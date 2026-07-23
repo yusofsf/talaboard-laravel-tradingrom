@@ -1,0 +1,1 @@
+<h1>فیش‌های واریزی</h1><table><tr><th>کاربر</th><th>مبلغ</th><th>فیش</th><th>وضعیت</th></tr>@foreach($deposits as $d)<tr><td>{{$d->user->name}}</td><td>{{number_format($d->amount)}}</td><td><a href="{{asset('storage/'.$d->receipt_path)}}">مشاهده</a></td><td>{{$d->status}}</td></tr>@endforeach</table>
