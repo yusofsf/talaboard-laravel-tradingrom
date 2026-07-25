@@ -60,6 +60,34 @@ class TelegramWebhookController extends Controller
         }
     }
 
+    private function siteRequest(string $endpoint, User $user, array $payload = []): ?array
+    {
+        return $this->membershipRequest($endpoint, [
+            'telegram_chat_id' => $user->telegram_chat_id,
+            ...$payload,
+        ]);
+    }
+
+    private function uploadReceiptToSite(User $user, int $depositId, array $file): bool
+    {
+        $fileInfo = $this->api('getFile', ['file_id' => $file['file_id']]);
+        $telegramPath = data_get($fileInfo, 'result.file_path');
+        $botToken = config('services.telegram.token');
+        $url = rtrim((string) config('services.membership.url'), '/');
+        $token = (string) config('services.membership.token');
+        if (! $telegramPath || ! $botToken || $url === '' || $token === '') return false;
+
+        try {
+            $contents = Http::get("https://api.telegram.org/file/bot{$botToken}/{$telegramPath}")->throw()->body();
+            $response = Http::withToken($token)->attach('receipt', $contents, basename($telegramPath))
+                ->post("{$url}/receipts", ['telegram_chat_id' => $user->telegram_chat_id, 'deposit_id' => $depositId]);
+
+            return $response->successful();
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
     private function hasVipAccess(User $user): bool
     {
         if ($user->is_admin) {
@@ -154,12 +182,14 @@ class TelegramWebhookController extends Controller
     private function tradeList(User $user, string $side, int $page): array
     {
         $perPage = 10;
-        $trades = Trade::where('user_id', $user->id)->where('side', $side)->latest('traded_at')->forPage($page, $perPage + 1)->get();
-        $hasMore = $trades->count() > $perPage;
-        $rows = $trades->take($perPage);
+        $trades = collect(data_get($this->siteRequest('overview', $user), 'trades', []))
+            ->filter(fn (array $trade) => ($trade['type'] ?? null) === $side)
+            ->values();
+        $hasMore = $trades->count() > $page * $perPage;
+        $rows = $trades->slice(($page - 1) * $perPage, $perPage);
         $title = $side === 'buy' ? 'لیست خرید' : 'لیست فروش';
         $text = "{$title} — صفحه {$page}\n\n";
-        $text .= $rows->isEmpty() ? 'موردی وجود ندارد.' : $rows->map(fn ($t) => "#{$t->id} | مقدار: {$t->quantity} ".($t->unit === 'gram' ? 'گرم' : 'مثقال')."\nواحد: ".number_format($t->unit_price).' | کل: '.number_format($t->total_price).' | '.\Morilog\Jalali\Jalalian::fromCarbon($t->traded_at->timezone(config('trading.timezone')))->format('Y/m/d H:i'))->join("\n\n");
+        $text .= $rows->isEmpty() ? 'موردی وجود ندارد.' : $rows->map(fn (array $t) => "#{$t['id']} | {$t['item_label']}\nمقدار: {$t['quantity']} | کل: ".number_format($t['total']).' | وضعیت: '.($t['status'] ?? 'active'))->join("\n\n");
 
         return [$text, $this->pagination("trades:{$side}", $page, $hasMore)];
     }
@@ -214,7 +244,7 @@ class TelegramWebhookController extends Controller
 
         if ($callback = $request->input('callback_query')) {
             if (str_starts_with((string) ($callback['data'] ?? ''), 'deposit:approve:')) {
-                $this->approveFromTelegram($callback);
+                $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'تأیید فیش فقط از پنل مدیریت سایت انجام می‌شود.', 'show_alert' => true]);
             } elseif (str_starts_with((string) ($callback['data'] ?? ''), 'trades:') || str_starts_with((string) ($callback['data'] ?? ''), 'deposits:')) {
                 $this->showCallbackList($callback);
             }
@@ -224,8 +254,7 @@ class TelegramWebhookController extends Controller
         $message = $request->input('message');
         if (! $message) return response()->noContent();
         $chat = $message['chat']; $user = $this->user($chat); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['شارژ کیف پول', 'لیست معاملات']];
-        if ($user->is_admin) $menu[] = ['فیش‌های در انتظار تأیید', 'فیش‌های تأییدشده'];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['شارژ کیف پول', 'لیست معاملات'], ['درخواست افزایش موجودی']];
         if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید. برای استفاده، در سایت وارد حساب ویژه شوید، از پروفایل کد اتصال بسازید و آن را به صورت /link کد برای ربات بفرستید.', $menu); return response()->noContent(); }
         if (preg_match('/^\/link\s+([A-Za-z0-9]{24})$/', $text, $matches)) {
             $member = $this->linkWebsiteAccount($user, $matches[1]);
@@ -234,14 +263,16 @@ class TelegramWebhookController extends Controller
         }
         if (str_starts_with($text, '/link')) { $this->send($chat['id'], 'فرمت صحیح: /link کد_اتصال', $menu); return response()->noContent(); }
         if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را با دستور /link کد ارسال کنید.', $menu); return response()->noContent(); }
-        if ($text === 'قیمت لحظه‌ای') { try { $rows = $prices->prices(); $out = "قیمت‌های لحظه‌ای (ریال)\n"; foreach ($rows as $r) $out .= "{$r->title}: ".number_format($r->price)."\n"; $this->send($chat['id'], $out, $menu); } catch (\Throwable) { $this->send($chat['id'], 'دریافت قیمت از طلای‌برد ناموفق بود.', $menu); } return response()->noContent(); }
+        if ($text === 'قیمت لحظه‌ای') { $site = $this->siteRequest('overview', $user); $rows = data_get($site, 'prices.gold', []); if (! $rows) { $this->send($chat['id'], 'دریافت قیمت از سایت ناموفق بود.', $menu); } else { $out = "قیمت‌های لحظه‌ای سایت (تومان)\n"; foreach (array_slice($rows, 0, 10, true) as $item => $price) $out .= "{$item}: ".number_format($price)."\n"; $this->send($chat['id'], $out, $menu); } return response()->noContent(); }
         if ($text === 'شارژ کیف پول') { $this->send($chat['id'], "شماره حساب: ".config('trading.account_number')."\nشبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\nابتدا مبلغ را با /deposit 1000000 بفرستید، سپس عکس فیش را ارسال کنید.", $menu); return response()->noContent(); }
-        if (str_starts_with($text, '/deposit ')) { $amount = (int) trim(substr($text, 9)); if ($amount < 10000) { $this->send($chat['id'], 'مبلغ باید حداقل ۱۰٬۰۰۰ ریال باشد.', $menu); } else { Cache::put('deposit:'.$user->id, $amount, now()->addHour()); $this->send($chat['id'], 'اکنون تصویر فیش واریزی را ارسال کنید.', $menu); } return response()->noContent(); }
-        if ($photo) { $amount = Cache::pull('deposit:'.$user->id); if (! $amount) { $this->send($chat['id'], 'اول مبلغ را با /deposit وارد کنید.', $menu); return response()->noContent(); } try { $file = end($photo); $path = $this->storeTelegramPhoto($file); $deposit = DepositRequest::create(['user_id' => $user->id, 'amount' => $amount, 'receipt_path' => $path]); $deposit->load('user'); $this->notifyAdmins($deposit, $file['file_id']); $this->send($chat['id'], 'فیش روی سرور ذخیره شد و برای تأیید ادمین ارسال شد.', $menu); } catch (\Throwable $e) { report($e); $this->send($chat['id'], 'ذخیره‌سازی فیش ناموفق بود؛ لطفاً دوباره تلاش کنید.', $menu); } return response()->noContent(); }
+        if ($text === 'درخواست افزایش موجودی') { $this->send($chat['id'], 'فرمت درخواست: /inventory gold 10\nموارد مجاز: gold، silver_999، silver_995، full_coin، half_coin، quarter_coin\nطلا و نقره بر حسب گرم، سکه‌ها بر حسب تعداد.', $menu); return response()->noContent(); }
+        if (str_starts_with($text, '/inventory ')) { [, $item, $quantity] = array_pad(explode(' ', $text), 3, null); $result = $this->siteRequest('inventory-increase', $user, ['item' => $item, 'quantity' => $quantity]); $this->send($chat['id'], $result ? "درخواست {$result['label']} در سایت ثبت شد و در انتظار تأیید ادمین است." : 'ثبت درخواست در سایت ناموفق بود؛ نوع و مقدار را بررسی کنید.', $menu); return response()->noContent(); }
+        if (str_starts_with($text, '/deposit ')) { $amount = (int) trim(substr($text, 9)); $deposit = $this->siteRequest('deposits', $user, ['amount' => $amount]); if ($deposit) { Cache::put('site-deposit:'.$user->id, $deposit['id'], now()->addHour()); $this->send($chat['id'], 'درخواست شارژ در سایت ثبت شد؛ اکنون تصویر فیش را ارسال کنید.', $menu); } else { $this->send($chat['id'], 'ثبت درخواست در سایت ناموفق بود؛ مبلغ را بررسی کنید.', $menu); } return response()->noContent(); }
+        if ($photo) { $depositId = Cache::pull('site-deposit:'.$user->id); $ok = $depositId && $this->uploadReceiptToSite($user, $depositId, end($photo)); $this->send($chat['id'], $ok ? 'فیش در سایت ذخیره شد و درخواست در انتظار تأیید ادمین است.' : 'ابتدا مبلغ را با /deposit وارد کنید یا دوباره تصویر فیش را ارسال کنید.', $menu); return response()->noContent(); }
         if ($text === 'لیست معاملات') { $this->sendInline($chat['id'], 'نوع فهرست را انتخاب کنید:', [[['text' => 'لیست خرید', 'callback_data' => 'trades:buy:1'], ['text' => 'لیست فروش', 'callback_data' => 'trades:sell:1']]]); return response()->noContent(); }
-        if ($text === 'فیش‌های در انتظار تأیید' || $text === 'فیش‌های تأییدشده') { if (! $user->is_admin) { $this->send($chat['id'], 'اجازهٔ دسترسی ندارید.', $menu); return response()->noContent(); } $status = $text === 'فیش‌های تأییدشده' ? 'approved' : 'pending'; [$out, $keyboard] = $this->depositList($user, $status, 1); $this->sendInline($chat['id'], $out, $keyboard); return response()->noContent(); }
+        if ($text === 'فیش‌های در انتظار تأیید' || $text === 'فیش‌های تأییدشده') { $this->send($chat['id'], 'فیش‌ها و تأیید آن‌ها فقط در پنل مدیریت سایت قابل مشاهده و بررسی هستند.', $menu); return response()->noContent(); }
         if ($text === 'ثبت معامله') { $this->send($chat['id'], 'فرمت ثبت معامله: /trade buy mesghal 1.250 یا /trade sell gram 4.5', $menu); return response()->noContent(); }
-        if (str_starts_with($text, '/trade ')) { [, $side, $unit, $qty] = array_pad(explode(' ', $text), 4, null); try { $t = $trades->create($user, ['side' => $side, 'unit' => $unit, 'quantity' => $qty]); $this->send($chat['id'], "معامله ثبت شد. قیمت واحد: ".number_format($t->unit_price).'، مبلغ کل: '.number_format($t->total_price), $menu); } catch (\Throwable $e) { $this->send($chat['id'], 'ثبت معامله ممکن نیست: '.$e->getMessage(), $menu); } return response()->noContent(); }
+        if (str_starts_with($text, '/trade ')) { [, $side, $unit, $qty] = array_pad(explode(' ', $text), 4, null); $trade = $this->siteRequest('trades', $user, ['side' => $side, 'unit' => $unit, 'quantity' => $qty]); $this->send($chat['id'], $trade ? "معامله در سایت ثبت شد. قیمت واحد: ".number_format($trade['price_per_unit']).'، مبلغ کل: '.number_format($trade['total']) : 'ثبت معامله در سایت ناموفق بود؛ موجودی و مقدار را بررسی کنید.', $menu); return response()->noContent(); }
         $this->send($chat['id'], 'یکی از گزینه‌های منو را انتخاب کنید.', $menu); return response()->noContent();
     }
 }
