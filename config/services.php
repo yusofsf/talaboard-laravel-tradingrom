@@ -8,4 +8,8 @@ return [
         'trades_path' => env('TALABOARD_TRADES_PATH', '/api/trading/trades'),
     ],
     'telegram' => ['token' => env('TELEGRAM_BOT_TOKEN')],
+    'membership' => [
+        'url' => env('MEMBERSHIP_API_URL'),
+        'token' => env('MEMBERSHIP_API_TOKEN'),
+    ],
 ];

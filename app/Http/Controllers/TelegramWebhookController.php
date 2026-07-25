@@ -42,6 +42,43 @@ class TelegramWebhookController extends Controller
         );
     }
 
+    private function membershipRequest(string $endpoint, array $payload): ?array
+    {
+        $url = rtrim((string) config('services.membership.url'), '/');
+        $token = (string) config('services.membership.token');
+
+        if ($url === '' || $token === '') {
+            return null;
+        }
+
+        try {
+            $response = Http::acceptJson()->withToken($token)->timeout(8)->post("{$url}/{$endpoint}", $payload);
+
+            return $response->successful() ? ($response->json() ?? []) : null;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function hasVipAccess(User $user): bool
+    {
+        if ($user->is_admin) {
+            return true;
+        }
+
+        $member = $this->membershipRequest('member', ['telegram_chat_id' => $user->telegram_chat_id]);
+
+        return (bool) data_get($member, 'linked') && (bool) data_get($member, 'vip');
+    }
+
+    private function linkWebsiteAccount(User $user, string $code): ?array
+    {
+        return $this->membershipRequest('link', [
+            'code' => strtoupper($code),
+            'telegram_chat_id' => $user->telegram_chat_id,
+        ]);
+    }
+
     private function storeTelegramPhoto(array $file): string
     {
         $fileInfo = $this->api('getFile', ['file_id' => $file['file_id']]);
@@ -151,6 +188,11 @@ class TelegramWebhookController extends Controller
         $parts = explode(':', (string) ($callback['data'] ?? ''));
         $page = max(1, (int) ($parts[2] ?? 1));
 
+        if (! $user || ! $this->hasVipAccess($user)) {
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'ابتدا حساب ویژهٔ سایت را با /link متصل کنید.', 'show_alert' => true]);
+            return;
+        }
+
         if ($parts[0] === 'trades' && in_array($parts[1] ?? '', ['buy', 'sell'], true)) {
             [$text, $keyboard] = $this->tradeList($user, $parts[1], $page);
         } elseif ($parts[0] === 'deposits' && in_array($parts[1] ?? '', ['pending', 'approved'], true) && $user?->is_admin) {
@@ -184,7 +226,14 @@ class TelegramWebhookController extends Controller
         $chat = $message['chat']; $user = $this->user($chat); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
         $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['شارژ کیف پول', 'لیست معاملات']];
         if ($user->is_admin) $menu[] = ['فیش‌های در انتظار تأیید', 'فیش‌های تأییدشده'];
-        if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید.', $menu); return response()->noContent(); }
+        if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید. برای استفاده، در سایت وارد حساب ویژه شوید، از پروفایل کد اتصال بسازید و آن را به صورت /link کد برای ربات بفرستید.', $menu); return response()->noContent(); }
+        if (preg_match('/^\/link\s+([A-Za-z0-9]{24})$/', $text, $matches)) {
+            $member = $this->linkWebsiteAccount($user, $matches[1]);
+            $this->send($chat['id'], $member ? 'حساب ویژهٔ سایت با موفقیت به این ربات متصل شد.' : 'اتصال انجام نشد. کد را از پروفایل حساب ویژهٔ سایت دریافت کنید و تا ۱۰ دقیقه استفاده کنید.', $menu);
+            return response()->noContent();
+        }
+        if (str_starts_with($text, '/link')) { $this->send($chat['id'], 'فرمت صحیح: /link کد_اتصال', $menu); return response()->noContent(); }
+        if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را با دستور /link کد ارسال کنید.', $menu); return response()->noContent(); }
         if ($text === 'قیمت لحظه‌ای') { try { $rows = $prices->prices(); $out = "قیمت‌های لحظه‌ای (ریال)\n"; foreach ($rows as $r) $out .= "{$r->title}: ".number_format($r->price)."\n"; $this->send($chat['id'], $out, $menu); } catch (\Throwable) { $this->send($chat['id'], 'دریافت قیمت از طلای‌برد ناموفق بود.', $menu); } return response()->noContent(); }
         if ($text === 'شارژ کیف پول') { $this->send($chat['id'], "شماره حساب: ".config('trading.account_number')."\nشبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\nابتدا مبلغ را با /deposit 1000000 بفرستید، سپس عکس فیش را ارسال کنید.", $menu); return response()->noContent(); }
         if (str_starts_with($text, '/deposit ')) { $amount = (int) trim(substr($text, 9)); if ($amount < 10000) { $this->send($chat['id'], 'مبلغ باید حداقل ۱۰٬۰۰۰ ریال باشد.', $menu); } else { Cache::put('deposit:'.$user->id, $amount, now()->addHour()); $this->send($chat['id'], 'اکنون تصویر فیش واریزی را ارسال کنید.', $menu); } return response()->noContent(); }
