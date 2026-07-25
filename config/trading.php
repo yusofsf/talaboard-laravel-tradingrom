@@ -2,8 +2,9 @@
 
 return [
     'currency' => env('TRADING_CURRENCY', 'IRR'),
-    'card_number' => env('DEPOSIT_CARD_NUMBER', '---- ---- ---- ---- ----'),
-    'iban' => env('DEPOSIT_IBAN', 'IR------------------------'),
+    'account_number' => env('DEPOSIT_ACCOUNT_NUMBER', '7604343793'),
+    'iban' => env('DEPOSIT_IBAN', 'IR89-0120-0100-0000-7604-3437-93'),
+    'account_holder' => env('DEPOSIT_ACCOUNT_HOLDER', 'محمود صفرپور'),
     'timezone' => 'Asia/Tehran',
     // بازار از ابتدای پنج‌شنبه تا ابتدای یکشنبه باز است؛ در .env قابل تغییر است.
     'weekend_open_day' => env('TRADING_OPEN_DAY', 4),
