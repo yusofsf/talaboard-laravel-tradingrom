@@ -17,6 +17,10 @@ class TradeService
         if ($isCoin !== ($data['unit'] === 'count')) throw ValidationException::withMessages(['unit' => 'واحد انتخاب‌شده با دارایی هم‌خوانی ندارد.']);
         if (! $isCoin && ! in_array($data['unit'], ['gram', 'mesghal'], true)) throw ValidationException::withMessages(['unit' => 'برای طلا و نقره واحد گرم یا مثقال را انتخاب کنید.']);
 
+        if (! Trade::meetsMinimumQuantity($data['unit'], (float) $data['quantity'])) {
+            throw ValidationException::withMessages(['quantity' => 'حداقل مقدار معامله ۱۰۰ گرم یا ۲۱٫۷۰۲ مثقال است.']);
+        }
+
         $symbol = $isCoin ? $data['asset'] : ($data['asset'] === 'gold' ? 'gold_'.$data['unit'] : $data['asset'].'_'.$data['unit']);
         $snapshot = $this->client->prices()->get($symbol);
         $unitPrice = (int) ($data['unit_price'] ?? $snapshot?->price ?? 0);

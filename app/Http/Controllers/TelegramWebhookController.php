@@ -178,6 +178,7 @@ class TelegramWebhookController extends Controller
         $perPage = 10;
         $trades = collect(data_get($this->siteRequest('overview', $user), 'trades', []))
             ->filter(fn (array $trade) => ($trade['type'] ?? null) === $side)
+            ->filter(fn (array $trade) => Trade::meetsMinimumQuantity((string) ($trade['unit'] ?? 'count'), (float) ($trade['quantity'] ?? 0)))
             ->values();
         $hasMore = $trades->count() > $page * $perPage;
         $rows = $trades->slice(($page - 1) * $perPage, $perPage);
@@ -300,8 +301,18 @@ class TelegramWebhookController extends Controller
         return implode("\n", $lines);
     }
 
+    private function meetsMinimumTradeQuantity(string $unit, float $quantity): bool
+    {
+        return Trade::meetsMinimumQuantity($unit, $quantity);
+    }
+
     private function completeTelegramTrade(User $user, array $flow, array $chat, array $menu): void
     {
+        if (! $this->meetsMinimumTradeQuantity($flow['unit'], (float) $flow['quantity'])) {
+            $this->send($chat['id'], 'حداقل مقدار معامله ۱۰۰ گرم یا ۲۱٫۷۰۲ مثقال است.', $menu);
+            return;
+        }
+
         try {
             $siteTrade = $this->siteRequest('trade-room/offers/create', $user, [
                 'side' => $flow['side'],
