@@ -18,7 +18,10 @@ class TelegramWebhookController extends Controller
         }
 
         try {
-            return Http::asForm()
+            // Telegram expects reply_markup to be a JSON object. When this was
+            // sent as form data, nested keyboard arrays were not parsed as a
+            // keyboard, so users only saw the "select ..." prompt.
+            return Http::asJson()
                 ->connectTimeout(5)
                 ->timeout(15)
                 ->withOptions(['force_ip_resolve' => 'v4'])

@@ -27,6 +27,24 @@ class TelegramCallbackTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage'));
     }
 
+    public function test_delivery_callback_sends_an_inline_keyboard_as_json(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Http::fake();
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'callback-id',
+                'data' => 'flow:delivery:start',
+                'message' => ['chat' => ['id' => 12345]],
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && in_array('application/json', $request->header('Content-Type'), true)
+            && ($request->data()['reply_markup']['inline_keyboard'][0][0]['callback_data'] ?? null) === 'flow:delivery:asset:gold');
+    }
+
     public function test_connect_uses_the_website_membership_api_when_configured(): void
     {
         config([
