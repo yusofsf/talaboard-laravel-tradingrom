@@ -17,7 +17,7 @@ class TradeService
         if ($isCoin !== ($data['unit'] === 'count')) throw ValidationException::withMessages(['unit' => 'واحد انتخاب‌شده با دارایی هم‌خوانی ندارد.']);
         if (! $isCoin && ! in_array($data['unit'], ['gram', 'mesghal'], true)) throw ValidationException::withMessages(['unit' => 'برای طلا و نقره واحد گرم یا مثقال را انتخاب کنید.']);
 
-        $symbol = $isCoin ? $data['asset'] : $data['asset'].'_'.$data['unit'];
+        $symbol = $isCoin ? $data['asset'] : ($data['asset'] === 'gold' ? 'gold_'.$data['unit'] : $data['asset'].'_'.$data['unit']);
         $snapshot = $this->client->prices()->get($symbol);
         $unitPrice = (int) ($data['unit_price'] ?? $snapshot?->price ?? 0);
         if ($unitPrice < 1) throw ValidationException::withMessages(['price' => 'قیمت پیش‌فرض این دارایی از سایت در دسترس نیست؛ قیمت واحد را وارد کنید.']);

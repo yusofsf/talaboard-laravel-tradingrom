@@ -12,7 +12,7 @@ class TradingController extends Controller
 
     public function storeTrade(Request $request, TradeService $service)
     {
-        $data = $request->validate(['side' => 'required|in:buy,sell', 'asset' => 'required|in:gold_995,gold_9999,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001', 'unit_price' => 'nullable|numeric|min:1']);
+        $data = $request->validate(['side' => 'required|in:buy,sell', 'asset' => 'required|in:gold,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001', 'unit_price' => 'nullable|numeric|min:1']);
         return response()->json($service->create($request->user(), $data), 201);
     }
 
@@ -25,7 +25,7 @@ class TradingController extends Controller
 
     public function storeInventoryDelivery(Request $request)
     {
-        $data = $request->validate(['asset' => 'required|in:gold_995,gold_9999,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001']);
+        $data = $request->validate(['asset' => 'required|in:gold,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001']);
         $coin = in_array($data['asset'], ['full_coin', 'half_coin', 'quarter_coin'], true);
         abort_if($coin !== ($data['unit'] === 'count'), 422, 'واحد انتخاب‌شده با دارایی هم‌خوانی ندارد.');
         return response()->json(InventoryDelivery::create([...$data, 'user_id' => $request->user()->id]), 201);
@@ -35,7 +35,7 @@ class TradingController extends Controller
 
     public function assets(Request $request)
     {
-        $names = ['gold_9999' => 'طلای ۹۹۹.۹', 'gold_995' => 'طلای ۹۹۵', 'silver_9999' => 'نقره ۹۹۹.۹', 'silver_995' => 'نقره ۹۹۵', 'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه'];
+        $names = ['gold' => 'طلا', 'silver_9999' => 'نقره ۹۹۹.۹', 'silver_995' => 'نقره ۹۹۵', 'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه'];
         return collect($names)->map(fn ($title, $asset) => ['asset' => $asset, 'title' => $title, 'quantity' => AssetBalance::where('user_id', $request->user()->id)->where('asset', $asset)->value('quantity') ?? 0])->values();
     }
 

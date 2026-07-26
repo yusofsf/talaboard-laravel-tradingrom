@@ -9,8 +9,7 @@ use Illuminate\Support\Facades\Http;
 class TalaboardClient
 {
     public const PRODUCTS = [
-        'gold_995_gram' => 'گرم طلای ۹۹۵', 'gold_995_mesghal' => 'مثقال طلای ۹۹۵',
-        'gold_9999_gram' => 'گرم طلای ۹۹۹.۹', 'gold_9999_mesghal' => 'مثقال طلای ۹۹۹.۹',
+        'gold_gram' => 'گرم طلا', 'gold_mesghal' => 'مثقال طلا',
         'silver_995_gram' => 'گرم نقره ۹۹۵', 'silver_995_mesghal' => 'مثقال نقره ۹۹۵',
         'silver_9999_gram' => 'گرم نقره ۹۹۹.۹', 'silver_9999_mesghal' => 'مثقال نقره ۹۹۹.۹',
         'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه',
@@ -25,8 +24,9 @@ class TalaboardClient
         $response->throw();
         foreach ($response->json('prices', $response->json()) as $key => $item) {
             $symbol = is_string($key) ? $key : ($item['symbol'] ?? null);
-            // قرارداد قدیمی طلابورد برای مثقال طلا همین نام را ارسال می‌کرد.
-            if ($symbol === 'gold_mesghal') $symbol = 'gold_995_mesghal';
+            // نام‌های قدیمی API به دو قیمت عمومی طلا نگاشت می‌شوند.
+            if ($symbol === 'gold_9999_gram' || $symbol === 'gold_995_gram') $symbol = 'gold_gram';
+            if ($symbol === 'gold_9999_mesghal' || $symbol === 'gold_995_mesghal') $symbol = 'gold_mesghal';
             if (! $symbol || ! isset(self::PRODUCTS[$symbol])) continue;
             PriceSnapshot::create(['symbol' => $symbol, 'title' => self::PRODUCTS[$symbol], 'price' => $item['price'] ?? $item['last_price'], 'source_updated_at' => $item['updated_at'] ?? now()]);
         }

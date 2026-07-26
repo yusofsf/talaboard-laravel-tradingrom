@@ -1,5 +1,5 @@
 @php
-    $assetLabels = ['gold_995' => 'طلای ۹۹۵', 'gold_9999' => 'طلای ۹۹۹.۹', 'silver_995' => 'نقره ۹۹۵', 'silver_9999' => 'نقره ۹۹۹.۹', 'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه'];
+    $assetLabels = ['gold' => 'طلا', 'silver_995' => 'نقره ۹۹۵', 'silver_9999' => 'نقره ۹۹۹.۹', 'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه'];
     $unitLabels = ['gram' => 'گرم', 'mesghal' => 'مثقال', 'count' => 'تعداد'];
 @endphp
 <table><tr><th>دارایی</th><th>واحد</th><th>مقدار</th><th>قیمت واحد</th><th>قیمت کل</th><th>تاریخ و ساعت</th></tr>
