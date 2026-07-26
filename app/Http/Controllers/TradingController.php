@@ -62,6 +62,28 @@ class TradingController extends Controller
         return response()->json(['message' => 'کیف پول شارژ شد.']);
     }
 
+    public function approveInventoryDelivery(Request $request, InventoryDelivery $delivery)
+    {
+        abort_unless($request->user()->is_admin, 403);
+        if ($delivery->status !== 'pending') return response()->json(['message' => 'این درخواست قبلاً بررسی شده است.'], 422);
+
+        \DB::transaction(function () use ($request, $delivery) {
+            $delivery->update(['status' => 'approved', 'reviewed_by' => $request->user()->id, 'reviewed_at' => now(), 'admin_note' => $request->input('note')]);
+            $quantity = $delivery->unit === 'mesghal' ? (float) $delivery->quantity * 4.608 : (float) $delivery->quantity;
+            AssetBalance::firstOrCreate(['user_id' => $delivery->user_id, 'asset' => $delivery->asset])->increment('quantity', $quantity);
+        });
+
+        return response()->json(['message' => 'تحویل به فروشگاه تأیید و موجودی انبار افزایش یافت.']);
+    }
+
+    public function rejectInventoryDelivery(Request $request, InventoryDelivery $delivery)
+    {
+        abort_unless($request->user()->is_admin, 403);
+        if ($delivery->status !== 'pending') return response()->json(['message' => 'این درخواست قبلاً بررسی شده است.'], 422);
+        $delivery->update(['status' => 'rejected', 'reviewed_by' => $request->user()->id, 'reviewed_at' => now(), 'admin_note' => $request->input('note')]);
+        return response()->json(['message' => 'درخواست تحویل رد شد.']);
+    }
+
     public function rejectDeposit(Request $request, DepositRequest $deposit)
     {
         abort_unless($request->user()->is_admin, 403);

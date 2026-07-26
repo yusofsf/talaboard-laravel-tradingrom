@@ -404,16 +404,71 @@ class TelegramWebhookController extends Controller
         return true;
     }
 
+    private function handleDeliveryCallback(array $callback, User $user, array $menu): bool
+    {
+        $data = (string) ($callback['data'] ?? '');
+        if (! str_starts_with($data, 'flow:delivery:')) {
+            return false;
+        }
+
+        $chat = $callback['message']['chat'];
+        $parts = explode(':', $data);
+        $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+
+        if ($data === 'flow:delivery:start') {
+            $this->saveFlow($user, ['type' => 'delivery', 'stage' => 'asset']);
+            $this->sendInline($chat['id'], 'دارایی تحویلی را انتخاب کنید:', $this->assetKeyboard('flow:delivery:asset'));
+            return true;
+        }
+
+        if (($parts[2] ?? '') === 'asset') {
+            $flow = ['type' => 'delivery', 'stage' => 'unit', 'asset' => $parts[3] ?? ''];
+            if ($this->isCoin($flow['asset'])) {
+                $flow['unit'] = 'count';
+                $flow['stage'] = 'quantity';
+                $this->saveFlow($user, $flow);
+                $this->send($chat['id'], 'تعداد سکهٔ تحویلی را وارد کنید.', $menu);
+            } else {
+                $this->saveFlow($user, $flow);
+                $this->sendInline($chat['id'], 'واحد وزن را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]);
+            }
+            return true;
+        }
+
+        if (($parts[2] ?? '') === 'unit') {
+            $flow = $this->flow($user);
+            $flow['unit'] = $parts[3] ?? '';
+            $flow['stage'] = 'quantity';
+            $this->saveFlow($user, $flow);
+            $this->send($chat['id'], 'مقدار وزن تحویلی را وارد کنید.', $menu);
+            return true;
+        }
+
+        return false;
+    }
+
     public function __invoke(Request $request, TalaboardClient $prices)
     {
         if ($secret = env('TELEGRAM_WEBHOOK_SECRET')) {
             abort_unless(hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token')), 403);
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'لیست معاملات'], ['افزایش موجودی', 'کیف پول و دارایی‌ها']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'لیست معاملات'], ['افزایش موجودی انبار', 'کیف پول و دارایی‌ها']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $chat ? $this->user($chat) : null;
+            $callbackData = (string) ($callback['data'] ?? '');
+            if ($user && $callbackData === 'flow:deposit:paid') {
+                $this->saveFlow($user, ['type' => 'deposit', 'stage' => 'amount']);
+                $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+                $this->send($chat['id'], 'مبلغ واریزی را به ریال وارد کنید.', $menu);
+                return response()->noContent();
+            }
+            if (str_starts_with($callbackData, 'trades:') || str_starts_with($callbackData, 'deposits:')) {
+                $this->showCallbackList($callback);
+                return response()->noContent();
+            }
+            if ($user && $this->handleDeliveryCallback($callback, $user, $menu)) return response()->noContent();
             if ($user && $this->handleFlowCallback($callback, $user, $menu)) return response()->noContent();
             if (str_starts_with((string) ($callback['data'] ?? ''), 'deposit:approve:')) {
                 $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'تأیید فیش فقط از پنل مدیریت سایت انجام می‌شود.', 'show_alert' => true]);
@@ -436,6 +491,10 @@ class TelegramWebhookController extends Controller
         if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را با دستور /link کد ارسال کنید.', $menu); return response()->noContent(); }
         $flow = $this->flow($user);
         if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
+        if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {
+            $this->sendInline($chat['id'], 'دارایی تحویلی را انتخاب کنید. پس از ثبت، درخواست تحویل به فروشگاه برای تأیید یا رد ادمین ارسال می‌شود.', [[['text' => 'تحویل به فروشگاه', 'callback_data' => 'flow:delivery:start']]]);
+            return response()->noContent();
+        }
         if ($text === 'واریز وجه' || $text === 'شارژ کیف پول') {
             $this->sendInline($chat['id'], "شماره کارت: ".config('trading.card_number')."\nشماره حساب: ".config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینهٔ زیر را بزنید تا مبلغ و تصویر فیش را ارسال کنید.", [[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]);
             return response()->noContent();
