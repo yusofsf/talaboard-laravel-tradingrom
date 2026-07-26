@@ -2,10 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\{DepositRequest, InventoryDelivery, Trade, User, WalletTransaction};
-use App\Services\TalaboardClient;
+use App\Models\{DepositRequest, InventoryDelivery, TelegramState, TelegramUpdate, Trade, User, WalletTransaction};
+use App\Services\{TalaboardClient, TelegramConnectionService};
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\{Cache, DB, Http, Storage};
+use Illuminate\Support\Facades\{Cache, DB, Http, Schema, Storage};
 
 class TelegramWebhookController extends Controller
 {
@@ -36,8 +36,11 @@ class TelegramWebhookController extends Controller
 
     private function user(array $chat): User
     {
-        // This is an in-memory identity only. Account data belongs exclusively to the website.
-        return new User(['telegram_chat_id' => (string) $chat['id']]);
+        if (! Schema::hasTable('telegram_connections')) {
+            return new User(['telegram_chat_id' => (string) $chat['id']]);
+        }
+        return User::query()->whereHas('telegramConnection', fn ($query) => $query->where('telegram_chat_id', (string) $chat['id']))->first()
+            ?? new User(['telegram_chat_id' => (string) $chat['id']]);
     }
 
     private function membershipRequest(string $endpoint, array $payload): ?array
@@ -88,9 +91,7 @@ class TelegramWebhookController extends Controller
 
     private function hasVipAccess(User $user): bool
     {
-        $member = $this->membershipRequest('member', ['telegram_chat_id' => $user->telegram_chat_id]);
-
-        return (bool) data_get($member, 'linked') && (bool) data_get($member, 'vip');
+        return $user->exists && $user->telegramConnection()->exists();
     }
 
     private function linkWebsiteAccount(User $user, string $code): ?array
@@ -270,9 +271,26 @@ class TelegramWebhookController extends Controller
     }
 
     private function flowKey(User $user): string { return 'telegram-flow:'.$user->telegram_chat_id; }
-    private function flow(User $user): array { return Cache::get($this->flowKey($user), []); }
-    private function saveFlow(User $user, array $flow): void { Cache::put($this->flowKey($user), $flow, now()->addHour()); }
-    private function clearFlow(User $user): void { Cache::forget($this->flowKey($user)); }
+    private function flow(User $user): array
+    {
+        $telegramUserId = $user->exists ? optional($user->telegramConnection)->telegram_user_id : null;
+        if (! $telegramUserId) return Cache::get($this->flowKey($user), []);
+        $state = TelegramState::where('telegram_user_id', $telegramUserId)->first();
+        if ($state?->expires_at?->isPast()) { $state->delete(); return []; }
+        return $state?->data ?? [];
+    }
+    private function saveFlow(User $user, array $flow): void
+    {
+        $telegramUserId = $user->exists ? optional($user->telegramConnection)->telegram_user_id : null;
+        if (! $telegramUserId) { Cache::put($this->flowKey($user), $flow, now()->addHour()); return; }
+        TelegramState::updateOrCreate(['telegram_user_id' => $telegramUserId], ['state' => ($flow['type'] ?? 'flow').'_'.($flow['stage'] ?? 'active'), 'data' => $flow, 'expires_at' => now()->addHour()]);
+    }
+    private function clearFlow(User $user): void
+    {
+        $telegramUserId = $user->exists ? optional($user->telegramConnection)->telegram_user_id : null;
+        if ($telegramUserId) TelegramState::where('telegram_user_id', $telegramUserId)->delete();
+        Cache::forget($this->flowKey($user));
+    }
 
     private function assetKeyboard(string $prefix): array
     {
@@ -447,10 +465,15 @@ class TelegramWebhookController extends Controller
         return false;
     }
 
-    public function __invoke(Request $request, TalaboardClient $prices)
+    public function __invoke(Request $request, TalaboardClient $prices, TelegramConnectionService $connections)
     {
         if ($secret = env('TELEGRAM_WEBHOOK_SECRET')) {
             abort_unless(hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token')), 403);
+        }
+
+        if ($updateId = $request->input('update_id')) {
+            if (TelegramUpdate::where('update_id', $updateId)->exists()) return response()->noContent();
+            try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
         $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'لیست معاملات'], ['افزایش موجودی انبار', 'کیف پول و دارایی‌ها']];
@@ -481,6 +504,15 @@ class TelegramWebhookController extends Controller
         $message = $request->input('message');
         if (! $message) return response()->noContent();
         $chat = $message['chat']; $user = $this->user($chat); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
+        if (preg_match('/^\/connect\s+(\d{6})$/', $text, $matches)) {
+            try {
+                $connections->connect($matches[1], (string) data_get($message, 'from.id'), (string) $chat['id'], data_get($message, 'from.username'));
+                $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
+            } catch (\Illuminate\Validation\ValidationException $exception) {
+                $this->send($chat['id'], $exception->errors()['code'][0] ?? $exception->errors()['telegram_user_id'][0] ?? 'اتصال انجام نشد.', $menu);
+            }
+            return response()->noContent();
+        }
         if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید. برای استفاده، در سایت وارد حساب ویژه شوید، از پروفایل کد اتصال بسازید و آن را به صورت /link کد برای ربات بفرستید.', $menu); return response()->noContent(); }
         if (preg_match('/^\/link\s+([A-Za-z0-9]{24})$/', $text, $matches)) {
             $member = $this->linkWebsiteAccount($user, $matches[1]);

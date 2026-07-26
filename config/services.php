@@ -12,7 +12,7 @@ return [
         'username' => env('METALSP_API_USERNAME'),
         'secret' => env('METALSP_API_SECRET'),
     ],
-    'telegram' => ['token' => env('TELEGRAM_BOT_TOKEN')],
+    'telegram' => ['token' => env('TELEGRAM_BOT_TOKEN'), 'connect_secret' => env('TELEGRAM_CONNECT_SECRET')],
     'membership' => [
         'url' => env('MEMBERSHIP_API_URL'),
         'token' => env('MEMBERSHIP_API_TOKEN'),

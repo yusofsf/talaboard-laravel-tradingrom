@@ -34,4 +34,5 @@ class User extends Authenticatable
 
     public function trades() { return $this->hasMany(Trade::class); }
     public function depositRequests() { return $this->hasMany(DepositRequest::class); }
+    public function telegramConnection() { return $this->hasOne(TelegramConnection::class); }
 }

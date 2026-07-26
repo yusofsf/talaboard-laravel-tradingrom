@@ -12,6 +12,10 @@ class TradeService
 
     public function create(User $user, array $data): Trade
     {
+        if (! empty($data['idempotency_key']) && ($existing = Trade::where('idempotency_key', $data['idempotency_key'])->first())) {
+            if ($existing->user_id !== $user->id) throw ValidationException::withMessages(['idempotency_key' => 'کلید درخواست نامعتبر است.']);
+            return $existing;
+        }
         if (! $this->hours->isOpen()) throw ValidationException::withMessages(['trading' => $this->hours->message()]);
         $isCoin = in_array($data['asset'], ['full_coin', 'half_coin', 'quarter_coin'], true);
         if ($isCoin !== ($data['unit'] === 'count')) throw ValidationException::withMessages(['unit' => 'واحد انتخاب‌شده با دارایی هم‌خوانی ندارد.']);
@@ -28,6 +32,10 @@ class TradeService
         $total = (int) round((float) $data['quantity'] * $unitPrice);
 
         return DB::transaction(function () use ($user, $data, $symbol, $unitPrice, $total) {
+            if (! empty($data['idempotency_key']) && ($existing = Trade::where('idempotency_key', $data['idempotency_key'])->lockForUpdate()->first())) {
+                if ($existing->user_id !== $user->id) throw ValidationException::withMessages(['idempotency_key' => 'کلید درخواست نامعتبر است.']);
+                return $existing;
+            }
             $user = User::lockForUpdate()->findOrFail($user->id);
             if ($data['side'] === 'sell') {
                 if ($user->wallet_balance < $total) throw ValidationException::withMessages(['wallet' => 'موجودی کیف پول کافی نیست.']);
@@ -38,7 +46,7 @@ class TradeService
                 if ($balance->quantity < $data['quantity']) throw ValidationException::withMessages(['assets' => 'موجودی دارایی کافی نیست.']);
                 $balance->decrement('quantity', $data['quantity']);
             }
-            $trade = Trade::create(['user_id' => $user->id, 'side' => $data['side'], 'asset' => $data['asset'], 'unit' => $data['unit'], 'quantity' => $data['quantity'], 'unit_price' => $unitPrice, 'total_price' => $total, 'price_symbol' => $symbol, 'status' => 'submitted', 'traded_at' => now(config('trading.timezone')), 'expires_at' => $this->expiry->forNow()]);
+            $trade = Trade::create(['user_id' => $user->id, 'side' => $data['side'], 'asset' => $data['asset'], 'unit' => $data['unit'], 'quantity' => $data['quantity'], 'unit_price' => $unitPrice, 'total_price' => $total, 'price_symbol' => $symbol, 'status' => 'submitted', 'idempotency_key' => $data['idempotency_key'] ?? null, 'traded_at' => now(config('trading.timezone')), 'expires_at' => $this->expiry->forNow()]);
             if ($data['side'] === 'sell') WalletTransaction::create(['user_id' => $user->id, 'amount' => -$total, 'type' => 'trade_reserve', 'reference_type' => Trade::class, 'reference_id' => $trade->id, 'description' => 'رزرو وجه معامله']);
             return $trade;
         });

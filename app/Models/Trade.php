@@ -10,7 +10,7 @@ class Trade extends Model
     public const MINIMUM_GRAMS = 100;
     public const MINIMUM_MESGHAL = 21.702;
 
-    protected $fillable = ['user_id', 'side', 'asset', 'unit', 'quantity', 'unit_price', 'total_price', 'price_symbol', 'status', 'talaboard_reference', 'traded_at', 'expires_at', 'accepted_by'];
+    protected $fillable = ['user_id', 'side', 'asset', 'unit', 'quantity', 'unit_price', 'total_price', 'price_symbol', 'status', 'talaboard_reference', 'idempotency_key', 'traded_at', 'expires_at', 'accepted_by'];
     protected function casts(): array { return ['quantity' => 'decimal:3', 'unit_price' => 'decimal:0', 'total_price' => 'decimal:0', 'traded_at' => 'datetime', 'expires_at' => 'datetime']; }
     public function user() { return $this->belongsTo(User::class); }
 
