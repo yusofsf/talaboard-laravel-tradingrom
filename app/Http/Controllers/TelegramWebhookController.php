@@ -173,12 +173,50 @@ class TelegramWebhookController extends Controller
         return $buttons ? [$buttons] : [];
     }
 
+    private function tradeUnit(array $trade): string
+    {
+        $unit = (string) ($trade['unit'] ?? '');
+        if (in_array($unit, ['gram', 'mesghal', 'count'], true)) {
+            return $unit;
+        }
+
+        $label = (string) ($trade['item_label'] ?? $trade['asset_label'] ?? '');
+        if (str_contains($label, 'مثقال')) {
+            return 'mesghal';
+        }
+
+        return str_contains($label, 'گرم') ? 'gram' : 'count';
+    }
+
+    private function livePricesText(TalaboardClient $prices): string
+    {
+        try {
+            $rows = $prices->prices();
+        } catch (\Throwable) {
+            return 'دریافت قیمت لحظه‌ای از سایت ناموفق بود؛ لطفاً دوباره تلاش کنید.';
+        }
+
+        $lines = ['💹 قیمت لحظه‌ای سایت (ریال)', ''];
+        foreach (TalaboardClient::PRODUCTS as $symbol => $label) {
+            $price = $rows->get($symbol)?->price;
+            $lines[] = (TalaboardClient::PRODUCT_ICONS[$symbol] ?? '▫️').' '.$label.': '.($price ? number_format($price) : '—');
+        }
+
+        $lines[] = '';
+        $lines[] = 'به‌روزرسانی: '.now(config('trading.timezone'))->format('H:i:s');
+
+        return implode("\n", $lines);
+    }
+
     private function tradeList(User $user, string $side, int $page): array
     {
         $perPage = 10;
-        $trades = collect(data_get($this->siteRequest('overview', $user), 'trades', []))
-            ->filter(fn (array $trade) => ($trade['type'] ?? null) === $side)
-            ->filter(fn (array $trade) => Trade::meetsMinimumQuantity((string) ($trade['unit'] ?? 'count'), (float) ($trade['quantity'] ?? 0)))
+        $response = $this->siteRequest('trade-room/offers', $user) ?? [];
+        $trades = collect($response['offers'] ?? $response['trades'] ?? $response)
+            ->filter('is_array')
+            ->filter(fn (array $trade) => ($trade['side'] ?? $trade['type'] ?? null) === $side)
+            ->filter(fn (array $trade) => Trade::meetsMinimumQuantity($this->tradeUnit($trade), (float) ($trade['quantity'] ?? 0)))
+            ->map(fn (array $trade) => [...$trade, 'item_label' => $trade['item_label'] ?? $trade['asset_label'] ?? $trade['asset'] ?? '—', 'total' => $trade['total'] ?? $trade['total_price'] ?? 0])
             ->values();
         $hasMore = $trades->count() > $page * $perPage;
         $rows = $trades->slice(($page - 1) * $perPage, $perPage);
@@ -397,6 +435,11 @@ class TelegramWebhookController extends Controller
         if (str_starts_with($text, '/link')) { $this->send($chat['id'], 'فرمت صحیح: /link کد_اتصال', $menu); return response()->noContent(); }
         if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را با دستور /link کد ارسال کنید.', $menu); return response()->noContent(); }
         $flow = $this->flow($user);
+        if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
+        if ($text === 'واریز وجه' || $text === 'شارژ کیف پول') {
+            $this->sendInline($chat['id'], "شماره کارت: ".config('trading.card_number')."\nشماره حساب: ".config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینهٔ زیر را بزنید تا مبلغ و تصویر فیش را ارسال کنید.", [[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]);
+            return response()->noContent();
+        }
         if ($text === 'کیف پول و دارایی‌ها') { $this->send($chat['id'], $this->accountSummary($user), $menu); return response()->noContent(); }
         if ($photo && ($flow['type'] ?? '') === 'deposit' && ($flow['stage'] ?? '') === 'receipt') {
             $ok = $this->uploadReceiptToSite($user, (int) $flow['deposit_id'], end($photo));

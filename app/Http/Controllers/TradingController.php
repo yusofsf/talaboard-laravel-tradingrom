@@ -61,4 +61,21 @@ class TradingController extends Controller
         });
         return response()->json(['message' => 'کیف پول شارژ شد.']);
     }
+
+    public function rejectDeposit(Request $request, DepositRequest $deposit)
+    {
+        abort_unless($request->user()->is_admin, 403);
+        if ($deposit->status !== 'pending') {
+            return response()->json(['message' => 'این فیش قبلاً بررسی شده است.'], 422);
+        }
+
+        $deposit->update([
+            'status' => 'rejected',
+            'reviewed_by' => $request->user()->id,
+            'reviewed_at' => now(),
+            'admin_note' => $request->input('note'),
+        ]);
+
+        return response()->json(['message' => 'فیش رد شد.']);
+    }
 }

@@ -15,6 +15,13 @@ class TalaboardClient
         'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه',
     ];
 
+    public const PRODUCT_ICONS = [
+        'gold_gram' => '🥇', 'gold_mesghal' => '⚖️',
+        'silver_995_gram' => '🥈', 'silver_995_mesghal' => '⚖️',
+        'silver_9999_gram' => '🌕', 'silver_9999_mesghal' => '⚖️',
+        'full_coin' => '🪙', 'half_coin' => '🪙', 'quarter_coin' => '🪙',
+    ];
+
     public function prices(): Collection
     {
         $url = config('services.talaboard.url');
