@@ -31,10 +31,15 @@ class TalaboardClient
             return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
         }
 
-        $response = Http::acceptJson()->withBasicAuth($username, $secret)
-            ->timeout(10)->get(config('services.metalsp.prices_url'));
-        $response->throw();
-        $payload = $response->json();
+        try {
+            $response = Http::acceptJson()->withBasicAuth($username, $secret)
+                ->timeout(10)->get(config('services.metalsp.prices_url'));
+            $response->throw();
+            $payload = $response->json();
+        } catch (\Throwable) {
+            // Keep the bot available during a temporary upstream outage.
+            return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
+        }
         $prices = [
             'gold_gram' => data_get($payload, 'gold.geram'),
             'gold_mesghal' => data_get($payload, 'gold.mithqal'),

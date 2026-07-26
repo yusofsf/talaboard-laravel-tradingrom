@@ -234,13 +234,17 @@ class TelegramWebhookController extends Controller
     private function tradeList(User $user, string $side, int $page): array
     {
         $perPage = 10;
-        $response = $this->siteRequest('trade-room/offers', $user) ?? [];
-        $trades = collect($response['offers'] ?? $response['trades'] ?? $response)
+        $response = $this->siteRequest('trade-room/offers', $user);
+        $trades = collect($response['offers'] ?? $response['trades'] ?? $response ?? [])
             ->filter('is_array')
             ->filter(fn (array $trade) => ($trade['side'] ?? $trade['type'] ?? null) === $side)
             ->filter(fn (array $trade) => Trade::meetsMinimumQuantity($this->tradeUnit($trade), (float) ($trade['quantity'] ?? 0)))
             ->map(fn (array $trade) => [...$trade, 'item_label' => $trade['item_label'] ?? $trade['asset_label'] ?? $trade['asset'] ?? '—', 'total' => $trade['total'] ?? $trade['total_price'] ?? 0])
             ->values();
+        if ($response === null) {
+            $trades = Trade::query()->tradable()->where('side', $side)->whereIn('status', ['submitted', 'active'])
+                ->latest('traded_at')->get()->map(fn (Trade $trade) => ['id' => $trade->id, 'item_label' => $trade->asset, 'quantity' => $trade->quantity, 'total' => $trade->total_price, 'status' => $trade->status]);
+        }
         $hasMore = $trades->count() > $page * $perPage;
         $rows = $trades->slice(($page - 1) * $perPage, $perPage);
         $title = $side === 'buy' ? 'لیست خرید' : 'لیست فروش';
@@ -326,6 +330,14 @@ class TelegramWebhookController extends Controller
     }
 
     private function isCoin(string $asset): bool { return in_array($asset, ['full_coin', 'half_coin', 'quarter_coin'], true); }
+
+    private function assetLabel(string $asset): string
+    {
+        return [
+            'gold' => 'طلا', 'silver_995' => 'نقره ۹۹۵', 'silver_9999' => 'نقره ۹۹۹.۹',
+            'full_coin' => 'تمام سکه', 'half_coin' => 'نیم سکه', 'quarter_coin' => 'ربع سکه',
+        ][$asset] ?? $asset;
+    }
 
     private function siteAsset(string $asset): string
     {
@@ -423,6 +435,19 @@ class TelegramWebhookController extends Controller
         $flow = $this->flow($user);
         $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
 
+        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'side') {
+            $this->send($chat['id'], 'معامله '.(($parts[3] ?? '') === 'buy' ? 'خرید' : 'فروش').' انتخاب شد.');
+        }
+        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'asset') {
+            $this->send($chat['id'], 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.');
+        }
+        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'unit') {
+            $this->send($chat['id'], 'واحد '.(($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال').' انتخاب شد.');
+        }
+        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'price') {
+            $this->send($chat['id'], (($parts[3] ?? '') === 'default' ? 'قیمت سایت' : 'ورود قیمت دلخواه').' انتخاب شد.');
+        }
+
         // The button label and its side must have the same meaning.
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'asset') {
             $this->saveFlow($user, ['type' => 'trade', 'stage' => 'side', 'asset' => $parts[3]]);
@@ -454,6 +479,13 @@ class TelegramWebhookController extends Controller
         $chat = $callback['message']['chat'];
         $parts = explode(':', $data);
         $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+
+        if (($parts[2] ?? '') === 'asset') {
+            $this->send($chat['id'], 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.');
+        }
+        if (($parts[2] ?? '') === 'unit') {
+            $this->send($chat['id'], 'واحد '.(($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال').' انتخاب شد.');
+        }
 
         if ($data === 'flow:delivery:start') {
             $this->saveFlow($user, ['type' => 'delivery', 'stage' => 'asset']);
@@ -506,6 +538,7 @@ class TelegramWebhookController extends Controller
             if ($user && $callbackData === 'flow:deposit:paid') {
                 $this->saveFlow($user, ['type' => 'deposit', 'stage' => 'amount']);
                 $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+                $this->send($chat['id'], 'گزینه «واریز کردم» انتخاب شد.');
                 $this->send($chat['id'], 'مبلغ واریزی را به ریال وارد کنید.', $menu);
                 return response()->noContent();
             }
