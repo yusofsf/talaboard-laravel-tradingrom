@@ -24,41 +24,37 @@ class TalaboardClient
 
     public function prices(): Collection
     {
-        $username = config('services.metalsp.username');
-        $secret = config('services.metalsp.secret');
+        $url = config('services.talaboard.url');
+        $token = config('services.talaboard.token');
 
-        if (! $username || ! $secret) {
+        if (! $url || ! $token) {
             return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
         }
 
         try {
-            $response = Http::acceptJson()->withBasicAuth($username, $secret)
-                ->timeout(10)->get(config('services.metalsp.prices_url'));
+            $response = Http::acceptJson()->withToken($token)
+                ->timeout(10)->get(rtrim($url, '/').config('services.talaboard.prices_path'));
             $response->throw();
-            $payload = $response->json();
+            $items = $response->json('prices', $response->json());
         } catch (\Throwable) {
             // Keep the bot available during a temporary upstream outage.
             return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
         }
-        $prices = [
-            'gold_gram' => data_get($payload, 'gold.geram'),
-            'gold_mesghal' => data_get($payload, 'gold.mithqal'),
-            'silver_995_gram' => data_get($payload, 'silver.gram_995'),
-            'silver_995_mesghal' => data_get($payload, 'silver.mithqal_995'),
-            'silver_9999_gram' => data_get($payload, 'silver.gram_999'),
-            'silver_9999_mesghal' => data_get($payload, 'silver.mithqal_999'),
-            'full_coin' => data_get($payload, 'gold.bahar'),
-            'half_coin' => data_get($payload, 'gold.nim'),
-            'quarter_coin' => data_get($payload, 'gold.rob'),
-        ];
 
-        foreach ($prices as $symbol => $price) {
+        foreach ($items as $key => $item) {
+            if (! is_array($item)) continue;
+            $symbol = is_string($key) ? $key : ($item['symbol'] ?? null);
+            // نام‌های قدیمی API به دو قیمت عمومی طلا نگاشت می‌شوند.
+            if ($symbol === 'gold_9999_gram' || $symbol === 'gold_995_gram') $symbol = 'gold_gram';
+            if ($symbol === 'gold_9999_mesghal' || $symbol === 'gold_995_mesghal') $symbol = 'gold_mesghal';
+            if (! $symbol || ! isset(self::PRODUCTS[$symbol])) continue;
+            $price = $item['price'] ?? $item['last_price'] ?? null;
             if (! is_numeric($price)) continue;
             PriceSnapshot::create([
                 'symbol' => $symbol,
                 'title' => self::PRODUCTS[$symbol],
-                'price' => (int) round($price * 10),
-                'source_updated_at' => now(),
+                'price' => $price,
+                'source_updated_at' => $item['updated_at'] ?? now(),
             ]);
         }
 
