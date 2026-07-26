@@ -513,9 +513,9 @@ class TelegramWebhookController extends Controller
             }
             return response()->noContent();
         }
-        if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید.\n\nبرای استفاده، وارد حساب ویژه خود در سایت شوید و از بخش پروفایل یک کد اتصال بسازید. سپس حداکثر تا ۱۰ دقیقه، آن را با قالب زیر برای ربات ارسال کنید:\n\n/connect CODE', $menu); return response()->noContent(); }
-        if (str_starts_with($text, '/connect')) { $this->send($chat['id'], 'فرمت صحیح: /connect CODE\n\nCODE باید کد ۶ رقمی ساخته‌شده در پروفایل سایت باشد و تا ۱۰ دقیقه اعتبار دارد.', $menu); return response()->noContent(); }
-        if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را حداکثر تا ۱۰ دقیقه با دستور /connect CODE ارسال کنید.', $menu); return response()->noContent(); }
+        if ($text === '/start') { $this->send($chat['id'], "به ربات اتاق معاملات طلای‌برد خوش آمدید.\n\nبرای استفاده، وارد حساب ویژه خود در سایت شوید و از بخش پروفایل یک کد اتصال بسازید. سپس حداکثر تا ۱۰ دقیقه، آن را با قالب زیر برای ربات ارسال کنید:\n\n/connect CODE", $menu); return response()->noContent(); }
+        if (str_starts_with($text, '/connect')) { $this->send($chat['id'], "فرمت صحیح: /connect CODE\n\nCODE باید کد ۶ رقمی ساخته‌شده در پروفایل سایت باشد و تا ۱۰ دقیقه اعتبار دارد.", $menu); return response()->noContent(); }
+        if (! $this->hasVipAccess($user)) { $this->send($chat['id'], "دسترسی ربات فقط برای اعضای ویژه فعال است.\n\nوارد سایت شوید، از پروفایل کد اتصال بسازید و آن را حداکثر تا ۱۰ دقیقه با دستور /connect CODE ارسال کنید.", $menu); return response()->noContent(); }
         $flow = $this->flow($user);
         if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
         if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {
