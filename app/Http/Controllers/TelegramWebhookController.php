@@ -253,7 +253,7 @@ class TelegramWebhookController extends Controller
         $page = max(1, (int) ($parts[2] ?? 1));
 
         if (! $user || ! $this->hasVipAccess($user)) {
-            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'ابتدا حساب ویژهٔ سایت را با /link متصل کنید.', 'show_alert' => true]);
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'ابتدا حساب ویژهٔ سایت را با /connect کد_اتصال متصل کنید.', 'show_alert' => true]);
             return;
         }
 
@@ -513,14 +513,9 @@ class TelegramWebhookController extends Controller
             }
             return response()->noContent();
         }
-        if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید. برای استفاده، در سایت وارد حساب ویژه شوید، از پروفایل کد اتصال بسازید و آن را به صورت /link کد برای ربات بفرستید.', $menu); return response()->noContent(); }
-        if (preg_match('/^\/link\s+([A-Za-z0-9]{24})$/', $text, $matches)) {
-            $member = $this->linkWebsiteAccount($user, $matches[1]);
-            $this->send($chat['id'], $member ? 'حساب ویژهٔ سایت با موفقیت به این ربات متصل شد.' : 'اتصال انجام نشد. کد را از پروفایل حساب ویژهٔ سایت دریافت کنید و تا ۱۰ دقیقه استفاده کنید.', $menu);
-            return response()->noContent();
-        }
-        if (str_starts_with($text, '/link')) { $this->send($chat['id'], 'فرمت صحیح: /link کد_اتصال', $menu); return response()->noContent(); }
-        if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را با دستور /link کد ارسال کنید.', $menu); return response()->noContent(); }
+        if ($text === '/start') { $this->send($chat['id'], 'به ربات اتاق معاملات طلای‌برد خوش آمدید.\n\nبرای استفاده، وارد حساب ویژه خود در سایت شوید و از بخش پروفایل یک کد اتصال بسازید. سپس حداکثر تا ۱۰ دقیقه، آن را با قالب زیر برای ربات ارسال کنید:\n\n/connect CODE', $menu); return response()->noContent(); }
+        if (str_starts_with($text, '/connect')) { $this->send($chat['id'], 'فرمت صحیح: /connect CODE\n\nCODE باید کد ۶ رقمی ساخته‌شده در پروفایل سایت باشد و تا ۱۰ دقیقه اعتبار دارد.', $menu); return response()->noContent(); }
+        if (! $this->hasVipAccess($user)) { $this->send($chat['id'], 'دسترسی ربات فقط برای اعضای ویژه فعال است. وارد سایت شوید، از پروفایل کد اتصال بسازید و آن را حداکثر تا ۱۰ دقیقه با دستور /connect CODE ارسال کنید.', $menu); return response()->noContent(); }
         $flow = $this->flow($user);
         if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
         if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {

@@ -21,7 +21,7 @@ class TelegramConnectionService
             $record = TelegramConnectionCode::create([
                 'user_id' => $user->id,
                 'code_hash' => $hash,
-                'expires_at' => now()->addMinutes(5),
+                'expires_at' => now()->addMinutes(10),
             ]);
 
             return ['code' => $code, 'expires_at' => $record->expires_at];
