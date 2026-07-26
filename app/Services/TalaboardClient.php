@@ -33,9 +33,10 @@ class TalaboardClient
 
         try {
             $response = Http::acceptJson()->withToken($token)
+                ->withOptions(['verify' => config('services.talaboard.verify_ssl', true)])
                 ->timeout(10)->get(rtrim($url, '/').config('services.talaboard.prices_path'));
             $response->throw();
-            $items = $response->json('prices', $response->json());
+            $items = $this->normalizePrices($response->json());
         } catch (\Throwable) {
             // Keep the bot available during a temporary upstream outage.
             return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
@@ -61,10 +62,36 @@ class TalaboardClient
         return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
     }
 
+    private function normalizePrices(array $payload): array
+    {
+        $items = $payload['prices'] ?? $payload;
+        if (! is_array($items)) {
+            return [];
+        }
+
+        if (isset($payload['gold']) || isset($payload['silver'])) {
+            return [
+                'gold_gram' => ['price' => $payload['gold']['geram'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'gold_mesghal' => ['price' => $payload['gold']['mithqal'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'silver_995_gram' => ['price' => $payload['silver']['gram_995'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'silver_995_mesghal' => ['price' => $payload['silver']['mithqal_995'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'silver_9999_gram' => ['price' => $payload['silver']['gram_999'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'silver_9999_mesghal' => ['price' => $payload['silver']['mithqal_999'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'full_coin' => ['price' => $payload['gold']['bahar'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'half_coin' => ['price' => $payload['gold']['nim'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+                'quarter_coin' => ['price' => $payload['gold']['rob'] ?? null, 'updated_at' => $payload['updated_at'] ?? null],
+            ];
+        }
+
+        return $items;
+    }
+
     public function registerTrade(array $payload): ?string
     {
         if (! config('services.talaboard.url')) return null;
-        $response = Http::acceptJson()->withToken(config('services.talaboard.token'))->post(rtrim(config('services.talaboard.url'), '/').config('services.talaboard.trades_path'), $payload);
+        $response = Http::acceptJson()->withToken(config('services.talaboard.token'))
+            ->withOptions(['verify' => config('services.talaboard.verify_ssl', true)])
+            ->post(rtrim(config('services.talaboard.url'), '/').config('services.talaboard.trades_path'), $payload);
         $response->throw();
         return (string) ($response->json('reference') ?? $response->json('id') ?? '');
     }
