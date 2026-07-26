@@ -17,7 +17,16 @@ class TelegramWebhookController extends Controller
             return [];
         }
 
-        return Http::post("https://api.telegram.org/bot{$token}/{$method}", $data)->json() ?? [];
+        try {
+            return Http::asForm()
+                ->connectTimeout(5)
+                ->timeout(15)
+                ->withOptions(['force_ip_resolve' => 'v4'])
+                ->post("https://api.telegram.org/bot{$token}/{$method}", $data)
+                ->json() ?? [];
+        } catch (\Throwable) {
+            return [];
+        }
     }
 
     private function send($chat, string $text, array $keyboard = []): void
