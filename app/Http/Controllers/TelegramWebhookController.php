@@ -69,6 +69,22 @@ class TelegramWebhookController extends Controller
         ]);
     }
 
+    private function usesMembershipApi(): bool
+    {
+        return (string) config('services.membership.url') !== ''
+            && (string) config('services.membership.token') !== '';
+    }
+
+    private function connectWebsiteAccount(array $message, string $code): ?array
+    {
+        return $this->membershipRequest('link', [
+            'code' => $code,
+            'telegram_user_id' => (string) data_get($message, 'from.id'),
+            'telegram_chat_id' => (string) data_get($message, 'chat.id'),
+            'telegram_username' => data_get($message, 'from.username'),
+        ]);
+    }
+
     private function uploadReceiptToSite(User $user, int $depositId, array $file): bool
     {
         $fileInfo = $this->api('getFile', ['file_id' => $file['file_id']]);
@@ -91,7 +107,13 @@ class TelegramWebhookController extends Controller
 
     private function hasVipAccess(User $user): bool
     {
-        return $user->exists && $user->telegramConnection()->exists();
+        if ($user->exists && $user->telegramConnection()->exists()) {
+            return true;
+        }
+
+        $membership = $this->siteRequest('member', $user);
+
+        return (bool) ($membership['linked'] ?? false) && (bool) ($membership['vip'] ?? false);
     }
 
     private function linkWebsiteAccount(User $user, string $code): ?array
@@ -506,8 +528,19 @@ class TelegramWebhookController extends Controller
         $chat = $message['chat']; $user = $this->user($chat); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
         if (preg_match('/^\/connect\s+(\d{6})$/', $text, $matches)) {
             try {
-                $connections->connect($matches[1], (string) data_get($message, 'from.id'), (string) $chat['id'], data_get($message, 'from.username'));
-                $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
+                if ($this->usesMembershipApi()) {
+                    $member = $this->connectWebsiteAccount($message, $matches[1]);
+                    if (! $member || ! ($member['linked'] ?? false)) {
+                        $this->send($chat['id'], 'کد اتصال نامعتبر است یا اعتبار آن تمام شده است.', $menu);
+                    } elseif (! ($member['vip'] ?? false)) {
+                        $this->send($chat['id'], 'حساب سایت شما متصل شد، اما عضویت ویژهٔ فعال ندارید.', $menu);
+                    } else {
+                        $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
+                    }
+                } else {
+                    $connections->connect($matches[1], (string) data_get($message, 'from.id'), (string) $chat['id'], data_get($message, 'from.username'));
+                    $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
+                }
             } catch (\Illuminate\Validation\ValidationException $exception) {
                 $this->send($chat['id'], $exception->errors()['code'][0] ?? $exception->errors()['telegram_user_id'][0] ?? 'اتصال انجام نشد.', $menu);
             }
