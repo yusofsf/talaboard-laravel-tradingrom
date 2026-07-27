@@ -8,6 +8,31 @@ use Tests\TestCase;
 
 class TelegramCallbackTest extends TestCase
 {
+    public function test_main_menu_places_wallet_and_assets_next_to_inventory_and_hides_account_status(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '/start',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(function ($request) {
+            if (! str_contains($request->url(), '/sendMessage')) {
+                return false;
+            }
+
+            $keyboard = $request['reply_markup']['keyboard'] ?? [];
+
+            return in_array(['کیف پول و دارایی‌ها', 'افزایش موجودی انبار'], $keyboard, true)
+                && ! collect($keyboard)->flatten()->contains('وضعیت حساب');
+        });
+    }
+
     public function test_paid_deposit_callback_starts_the_amount_flow(): void
     {
         config(['services.telegram.token' => 'test-token']);
