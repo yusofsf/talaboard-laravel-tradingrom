@@ -14,8 +14,16 @@ class Trade extends Model
     protected function casts(): array { return ['quantity' => 'decimal:3', 'unit_price' => 'decimal:0', 'total_price' => 'decimal:0', 'traded_at' => 'datetime', 'expires_at' => 'datetime']; }
     public function user() { return $this->belongsTo(User::class); }
 
-    public static function meetsMinimumQuantity(string $unit, float $quantity): bool
+    public static function meetsMinimumQuantity(string $unit, float $quantity, ?string $asset = null): bool
     {
+        if ($quantity <= 0) {
+            return false;
+        }
+
+        if (! in_array($asset, ['silver_995', 'silver_999', 'silver_9999'], true)) {
+            return true;
+        }
+
         return match ($unit) {
             'gram' => $quantity >= self::MINIMUM_GRAMS,
             'mesghal' => $quantity >= self::MINIMUM_MESGHAL,
@@ -26,9 +34,13 @@ class Trade extends Model
     public function scopeTradable(Builder $query): Builder
     {
         return $query->where(function (Builder $query) {
-            $query->whereNotIn('unit', ['gram', 'mesghal'])
-                ->orWhere(fn (Builder $query) => $query->where('unit', 'gram')->where('quantity', '>=', self::MINIMUM_GRAMS))
-                ->orWhere(fn (Builder $query) => $query->where('unit', 'mesghal')->where('quantity', '>=', self::MINIMUM_MESGHAL));
+            $query->whereNotIn('asset', ['silver_995', 'silver_999', 'silver_9999'])
+                ->orWhereNull('asset')
+                ->orWhere(function (Builder $query) {
+                    $query->whereNotIn('unit', ['gram', 'mesghal'])
+                        ->orWhere(fn (Builder $query) => $query->where('unit', 'gram')->where('quantity', '>=', self::MINIMUM_GRAMS))
+                        ->orWhere(fn (Builder $query) => $query->where('unit', 'mesghal')->where('quantity', '>=', self::MINIMUM_MESGHAL));
+                });
         });
     }
 }

@@ -24,5 +24,6 @@ return [
     'membership' => [
         'url' => env('MEMBERSHIP_API_URL'),
         'token' => env('MEMBERSHIP_API_TOKEN'),
+        'web_url' => env('MEMBERSHIP_WEB_URL'),
     ],
 ];

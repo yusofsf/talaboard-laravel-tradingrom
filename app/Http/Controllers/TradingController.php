@@ -12,7 +12,7 @@ class TradingController extends Controller
 
     public function storeTrade(Request $request, TradeService $service)
     {
-        $data = $request->validate(['side' => 'required|in:buy,sell', 'asset' => 'required|in:gold,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001', 'unit_price' => 'nullable|numeric|min:1']);
+        $data = $request->validate(['side' => 'required|in:buy,sell', 'asset' => 'required|in:gold,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001', 'unit_price' => 'nullable|numeric|min:1', 'idempotency_key' => 'nullable|string|max:255']);
         return response()->json($service->create($request->user(), $data), 201);
     }
 
@@ -43,7 +43,7 @@ class TradingController extends Controller
     {
         abort_unless($request->user()->is_admin, 403);
         abort_if($trade->status !== 'submitted' || $trade->expires_at->isPast(), 422, 'سفارش قابل پذیرش نیست.');
-        abort_unless(Trade::meetsMinimumQuantity($trade->unit, (float) $trade->quantity), 422, 'حداقل مقدار قابل پذیرش ۱۰۰ گرم یا ۲۱٫۷۰۲ مثقال است.');
+        abort_unless(Trade::meetsMinimumQuantity($trade->unit, (float) $trade->quantity, $trade->asset), 422, 'حداقل مقدار قابل پذیرش نقره ۱۰۰ گرم یا ۲۱٫۷۰۲ مثقال است.');
         $trade->update(['status' => 'accepted', 'accepted_by' => $request->user()->id, 'talaboard_reference' => $client->registerTrade(['local_trade_id' => $trade->id, 'side' => $trade->side, 'asset' => $trade->asset, 'unit' => $trade->unit, 'quantity' => $trade->quantity, 'unit_price' => $trade->unit_price, 'total_price' => $trade->total_price])]);
         if ($trade->side === 'sell') AssetBalance::firstOrCreate(['user_id' => $trade->user_id, 'asset' => $trade->asset])->increment('quantity', $trade->quantity);
         return response()->json($trade);
