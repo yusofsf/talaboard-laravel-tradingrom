@@ -23,8 +23,9 @@ class TelegramWebhookController extends Controller
             // sent as form data, nested keyboard arrays were not parsed as a
             // keyboard, so users only saw the "select ..." prompt.
             $response = Http::asJson()
-                ->connectTimeout(2)
-                ->timeout(8)
+                ->connectTimeout(5)
+                ->timeout(12)
+                ->retry(2, 250)
                 ->withOptions(['force_ip_resolve' => 'v4'])
                 ->post("https://api.telegram.org/bot{$token}/{$method}", $data);
             $result = $response->json() ?? [];
@@ -36,10 +37,11 @@ class TelegramWebhookController extends Controller
 
             return $result;
         } catch (\Throwable $exception) {
+            $safeMessage = str_replace((string) $token, '[REDACTED]', $exception->getMessage());
             Log::channel(config('trading.log_channel', 'trading'))->error('Telegram API request failed.', [
                 'method' => $method,
                 'exception' => $exception::class,
-                'message' => $exception->getMessage(),
+                'message' => $safeMessage,
             ]);
             return [];
         }
