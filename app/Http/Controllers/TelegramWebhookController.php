@@ -294,19 +294,324 @@ class TelegramWebhookController extends Controller
             ->filter(fn ($trade) => is_array($trade))
             ->filter(fn (array $trade) => ($trade['side'] ?? $trade['type'] ?? null) === $side)
             ->filter(fn (array $trade) => Trade::meetsMinimumQuantity($this->tradeUnit($trade), (float) ($trade['quantity'] ?? 0)))
-            ->map(fn (array $trade) => [...$trade, 'item_label' => $trade['item_label'] ?? $trade['asset_label'] ?? $trade['asset'] ?? '—', 'total' => $trade['total'] ?? $trade['total_price'] ?? 0])
+            ->map(fn (array $trade) => $this->normalizeOffer($trade))
             ->values();
         if ($response === null) {
             $trades = Trade::query()->tradable()->where('side', $side)->whereIn('status', ['submitted', 'active'])
-                ->latest('traded_at')->get()->map(fn (Trade $trade) => ['id' => $trade->id, 'item_label' => $trade->asset, 'quantity' => $trade->quantity, 'total' => $trade->total_price, 'status' => $trade->status]);
+                ->latest('traded_at')->get()->map(fn (Trade $trade) => $this->normalizeOffer([
+                    'id' => $trade->id,
+                    'side' => $trade->side,
+                    'asset' => $trade->asset,
+                    'unit' => $trade->unit,
+                    'quantity' => $trade->quantity,
+                    'unit_price' => $trade->unit_price,
+                    'total_price' => $trade->total_price,
+                    'status' => $trade->status,
+                ]));
         }
         $hasMore = $trades->count() > $page * $perPage;
         $rows = $trades->slice(($page - 1) * $perPage, $perPage);
         $title = $side === 'buy' ? 'لیست خرید' : 'لیست فروش';
-        $text = "{$title} — صفحه {$page}\n\n";
-        $text .= $rows->isEmpty() ? 'موردی وجود ندارد.' : $rows->map(fn (array $t) => "#{$t['id']} | {$t['item_label']}\nمقدار: {$t['quantity']} | کل: ".number_format($t['total']).' | وضعیت: '.($t['status'] ?? 'active'))->join("\n\n");
 
-        return [$text, $this->pagination("trades:{$side}", $page, $hasMore)];
+        return [$title, $rows->values(), $this->pagination("trades:{$side}", $page, $hasMore), $page];
+    }
+
+    private function normalizeOffer(array $trade): array
+    {
+        $quantity = (float) ($trade['quantity'] ?? $trade['remaining_quantity'] ?? 0);
+        $unitPrice = (float) ($trade['unit_price'] ?? $trade['price_per_unit'] ?? 0);
+        $total = (float) ($trade['total'] ?? $trade['total_price'] ?? ($quantity * $unitPrice));
+        $asset = (string) ($trade['asset'] ?? $trade['item'] ?? '');
+        $assetLabels = [
+            'gold' => 'طلا',
+            'silver_995' => 'نقره ۹۹۵',
+            'silver_999' => 'نقره ۹۹۹.۹',
+            'silver_9999' => 'نقره ۹۹۹.۹',
+            'full_coin' => 'تمام سکه',
+            'half_coin' => 'نیم سکه',
+            'quarter_coin' => 'ربع سکه',
+        ];
+        $unitLabels = ['gram' => 'گرم', 'mesghal' => 'مثقال', 'piece' => 'عدد', 'count' => 'عدد'];
+        $statusLabels = ['active' => 'فعال', 'submitted' => 'فعال', 'accepted' => 'پذیرفته‌شده', 'rejected' => 'ردشده'];
+        $unit = (string) ($trade['unit'] ?? $this->tradeUnit($trade));
+
+        return [
+            ...$trade,
+            'id' => $trade['id'] ?? $trade['offer_id'] ?? null,
+            'side' => $trade['side'] ?? $trade['type'] ?? null,
+            'asset_label' => $assetLabels[$asset] ?? ($trade['item_label'] ?? $trade['asset_label'] ?? ($asset ?: '—')),
+            'unit_label' => $unitLabels[$unit] ?? $unit,
+            'unit' => $unit,
+            'quantity' => $quantity,
+            'unit_price' => $unitPrice,
+            'total' => $total,
+            'status_label' => $statusLabels[$trade['status'] ?? 'active'] ?? ($trade['status'] ?? 'فعال'),
+        ];
+    }
+
+    private function offerText(array $trade, string $title, int $page): string
+    {
+        return "{$title} — صفحه {$page}\n\n"
+            .($trade['asset_label'] ?? '—')."\n"
+            .'مقدار: '.$this->formatQuantity((float) ($trade['quantity'] ?? 0)).' '.($trade['unit_label'] ?? '')."\n"
+            .'قیمت واحد: '.number_format((float) ($trade['unit_price'] ?? 0))." ریال\n"
+            .'مبلغ کل: '.number_format((float) ($trade['total'] ?? 0))." ریال\n"
+            .'وضعیت: '.($trade['status_label'] ?? 'فعال');
+    }
+
+    private function formatQuantity(float $quantity): string
+    {
+        return rtrim(rtrim(number_format($quantity, 3, '.', ''), '0'), '.');
+    }
+
+    private function offerAcceptKeyboard(array $trade): array
+    {
+        if (empty($trade['id'])) {
+            return [];
+        }
+
+        return [[
+            ['text' => 'پذیرفتن کل', 'callback_data' => 'trade_accept:full:'.$trade['id']],
+            ['text' => 'پذیرفتن جز', 'callback_data' => 'trade_accept:partial:'.$trade['id']],
+        ]];
+    }
+
+    private function sendTradeListMessages(User $user, int|string $chatId, string $side, int $page, array $menu = []): void
+    {
+        [$title, $rows, $pagination, $page] = $this->tradeList($user, $side, $page);
+
+        if ($rows->isEmpty()) {
+            $this->send($chatId, "{$title} — صفحه {$page}\n\nموردی وجود ندارد.", $menu);
+            return;
+        }
+
+        $rows->each(function (array $trade) use ($chatId, $title, $page) {
+            $keyboard = $this->offerAcceptKeyboard($trade);
+            $text = $this->offerText($trade, $title, $page);
+            $keyboard ? $this->sendInline($chatId, $text, $keyboard) : $this->send($chatId, $text);
+        });
+
+        if ($pagination) {
+            $this->sendInline($chatId, "{$title} — صفحه {$page}", $pagination);
+        }
+    }
+
+    private function myTradeRoomList(User $user, int $page, array $statuses = ['submitted', 'active'], string $paginationPrefix = 'trades:mine'): array
+    {
+        $perPage = 10;
+        $response = $this->siteRequest('trade-room/offers', $user, ['mine' => true, 'status' => count($statuses) === 1 ? $statuses[0] : $statuses]);
+        $trades = collect($response['offers'] ?? $response['trades'] ?? $response ?? [])
+            ->filter(fn ($trade) => is_array($trade))
+            ->map(fn (array $trade) => $this->normalizeOffer($trade))
+            ->filter(fn (array $trade) => in_array((string) ($trade['status'] ?? ''), $statuses, true))
+            ->sortByDesc(fn (array $trade) => $trade['created_at'] ?? $trade['traded_at'] ?? $trade['id'] ?? 0)
+            ->values();
+
+        if ($response === null && ! $this->usesMembershipApi() && $user->exists) {
+            $query = Trade::query()->whereIn('status', $statuses)->latest('traded_at');
+            if (in_array('accepted', $statuses, true)) {
+                $query->where(fn ($query) => $query->where('user_id', $user->id)->orWhere('accepted_by', $user->id));
+            } else {
+                $query->where('user_id', $user->id);
+            }
+
+            $trades = $query->get()
+                ->map(fn (Trade $trade) => $this->normalizeOffer([
+                    'id' => $trade->id,
+                    'side' => $trade->side,
+                    'asset' => $trade->asset,
+                    'unit' => $trade->unit,
+                    'quantity' => $trade->quantity,
+                    'unit_price' => $trade->unit_price,
+                    'total_price' => $trade->total_price,
+                    'status' => $trade->status,
+                    'traded_at' => $trade->traded_at?->toIso8601String(),
+                ]));
+        }
+
+        $hasMore = $trades->count() > $page * $perPage;
+        $rows = $trades->slice(($page - 1) * $perPage, $perPage)->values();
+
+        Log::channel(config('trading.log_channel', 'trading'))->info('Personal trade-room offers displayed.', [
+            'telegram_chat_id' => $user->telegram_chat_id,
+            'statuses' => $statuses,
+            'total_count' => $trades->count(),
+            'page' => $page,
+        ]);
+
+        return [$rows, $this->pagination($paginationPrefix, $page, $hasMore), $page];
+    }
+
+    private function myOfferText(array $trade, int $page, string $title = 'معاملات من'): string
+    {
+        $side = match ($trade['side'] ?? '') {
+            'buy' => 'خرید',
+            'sell' => 'فروش',
+            default => 'معامله',
+        };
+
+        return "📋 {$title} — صفحه {$page}\n\n"
+            .$side.' '.($trade['asset_label'] ?? '—')."\n"
+            .'مقدار: '.$this->formatQuantity((float) ($trade['quantity'] ?? 0)).' '.($trade['unit_label'] ?? '')."\n"
+            .'قیمت واحد: '.number_format((float) ($trade['unit_price'] ?? 0))." ریال\n"
+            .'مبلغ کل: '.number_format((float) ($trade['total'] ?? 0))." ریال\n"
+            .'وضعیت: '.($trade['status_label'] ?? 'فعال');
+    }
+
+    private function sendMyTradeRoomMessages(User $user, int|string $chatId, int $page, array $menu = []): void
+    {
+        [$rows, $pagination, $page] = $this->myTradeRoomList($user, $page);
+
+        if ($rows->isEmpty()) {
+            $this->send($chatId, "📋 معاملات من — صفحه {$page}\n\nمعامله فعالی در اتاق معاملاتی ندارید.", $menu);
+            return;
+        }
+
+        $rows->each(function (array $trade) use ($chatId, $page) {
+            $keyboard = empty($trade['id']) ? [] : [[
+                ['text' => 'حذف', 'callback_data' => 'trade_delete:'.$trade['id']],
+            ]];
+            $text = $this->myOfferText($trade, $page);
+            $keyboard ? $this->sendInline($chatId, $text, $keyboard) : $this->send($chatId, $text);
+        });
+
+        if ($pagination) {
+            $this->sendInline($chatId, "📋 معاملات من — صفحه {$page}", $pagination);
+        }
+    }
+
+    private function sendMyTradeRoomHistoryMessages(User $user, int|string $chatId, int $page, array $menu = []): void
+    {
+        [$rows, $pagination, $page] = $this->myTradeRoomList($user, $page, ['accepted'], 'trades:history');
+
+        if ($rows->isEmpty()) {
+            $this->send($chatId, "📋 سوابق من — صفحه {$page}\n\nمعامله پذیرفته‌شده‌ای در اتاق معاملاتی ندارید.", $menu);
+            return;
+        }
+
+        $rows->each(function (array $trade) use ($chatId, $page) {
+            $this->send($chatId, $this->myOfferText($trade, $page, 'سوابق من'));
+        });
+
+        if ($pagination) {
+            $this->sendInline($chatId, "📋 سوابق من — صفحه {$page}", $pagination);
+        }
+    }
+
+    private function handleTradeDeleteCallback(array $callback, User $user, array $menu): bool
+    {
+        $data = (string) ($callback['data'] ?? '');
+        if (! str_starts_with($data, 'trade_delete:')) {
+            return false;
+        }
+
+        $offerId = (int) substr($data, strlen('trade_delete:'));
+        $chatId = data_get($callback, 'message.chat.id');
+        if (! $offerId || ! $chatId) {
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'درخواست نامعتبر است.', 'show_alert' => true]);
+            return true;
+        }
+
+        $deleted = $this->siteRequest("trade-room/offers/{$offerId}/cancel", $user, ['offer_id' => $offerId]);
+        if ($deleted === null && ! $this->usesMembershipApi() && $user->exists) {
+            $trade = $user->trades()->whereKey($offerId)->whereIn('status', ['submitted', 'active'])->first();
+            if ($trade) {
+                $trade->delete();
+                $deleted = ['deleted' => true];
+            }
+        }
+
+        Log::channel(config('trading.log_channel', 'trading'))->info('Personal trade-room offer deletion requested from Telegram.', [
+            'telegram_chat_id' => $user->telegram_chat_id,
+            'offer_id' => $offerId,
+            'deleted' => $deleted !== null,
+        ]);
+
+        $this->api('answerCallbackQuery', [
+            'callback_query_id' => $callback['id'],
+            'text' => $deleted ? 'معامله حذف شد.' : 'حذف معامله ناموفق بود.',
+            'show_alert' => $deleted === null,
+        ]);
+
+        if ($deleted) {
+            $messageId = data_get($callback, 'message.message_id');
+            $messageId
+                ? $this->api('deleteMessage', ['chat_id' => $chatId, 'message_id' => $messageId])
+                : $this->send($chatId, 'معامله از اتاق معاملاتی حذف شد.', $menu);
+        }
+
+        return true;
+    }
+
+    private function acceptOffer(User $user, int|string $chatId, int $offerId, ?float $quantity, array $menu): void
+    {
+        if ($quantity !== null && $quantity <= 0) {
+            $this->send($chatId, 'مقدار معتبر را وارد کنید.', $menu);
+            return;
+        }
+
+        $payload = ['offer_id' => $offerId];
+        if ($quantity !== null) {
+            $payload['quantity'] = $quantity;
+        }
+
+        $accepted = $this->siteRequest("trade-room/offers/{$offerId}/accept", $user, $payload);
+
+        if ($accepted === null && ! $this->usesMembershipApi() && $user->exists) {
+            $trade = Trade::query()->whereKey($offerId)->whereIn('status', ['submitted', 'active'])->first();
+            if ($trade && ($quantity === null || $quantity <= (float) $trade->quantity) && Trade::meetsMinimumQuantity($trade->unit, $quantity ?? (float) $trade->quantity)) {
+                $accepted = DB::transaction(function () use ($trade, $user, $quantity) {
+                    $acceptQuantity = $quantity ?? (float) $trade->quantity;
+                    $trade->update([
+                        'quantity' => $acceptQuantity,
+                        'total_price' => (int) round($acceptQuantity * (float) $trade->unit_price),
+                        'status' => 'accepted',
+                        'accepted_by' => $user->id,
+                    ]);
+
+                    return $trade->toArray();
+                });
+            }
+        }
+
+        Log::channel(config('trading.log_channel', 'trading'))->info('Trade offer accept requested from Telegram.', [
+            'telegram_chat_id' => $user->telegram_chat_id,
+            'offer_id' => $offerId,
+            'quantity' => $quantity,
+            'accepted' => $accepted !== null,
+        ]);
+
+        $this->send($chatId, $accepted ? 'معامله در سایت ثبت شد.' : 'ثبت پذیرش معامله در سایت ناموفق بود؛ دوباره تلاش کنید.', $menu);
+    }
+
+    private function handleTradeAcceptCallback(array $callback, User $user, array $menu): bool
+    {
+        $data = (string) ($callback['data'] ?? '');
+        if (! str_starts_with($data, 'trade_accept:')) {
+            return false;
+        }
+
+        $chat = $callback['message']['chat'] ?? [];
+        $parts = explode(':', $data);
+        $mode = $parts[1] ?? '';
+        $offerId = (int) ($parts[2] ?? 0);
+
+        if (! $offerId || ! in_array($mode, ['full', 'partial'], true)) {
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'درخواست نامعتبر است.', 'show_alert' => true]);
+            return true;
+        }
+
+        $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+
+        if ($mode === 'full') {
+            $this->acceptOffer($user, $chat['id'], $offerId, null, $menu);
+            return true;
+        }
+
+        $this->saveFlow($user, ['type' => 'trade_accept', 'stage' => 'partial_quantity', 'offer_id' => $offerId]);
+        $this->send($chat['id'], 'مقدار موردنظر برای پذیرش جزئی را وارد کنید. حداقل ۱۰۰ گرم و حداکثر مقدار همین معامله قابل قبول است.', $menu);
+
+        return true;
     }
 
     private function myTradeList(User $user, int $page): array
@@ -409,9 +714,17 @@ class TelegramWebhookController extends Controller
         }
 
         if ($parts[0] === 'trades' && ($parts[1] ?? '') === 'mine') {
-            [$text, $keyboard] = $this->myTradeList($user, $page);
+            $this->sendMyTradeRoomMessages($user, $chat['id'], $page);
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+            return;
+        } elseif ($parts[0] === 'trades' && ($parts[1] ?? '') === 'history') {
+            $this->sendMyTradeRoomHistoryMessages($user, $chat['id'], $page);
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+            return;
         } elseif ($parts[0] === 'trades' && in_array($parts[1] ?? '', ['buy', 'sell'], true)) {
-            [$text, $keyboard] = $this->tradeList($user, $parts[1], $page);
+            $this->sendTradeListMessages($user, $chat['id'], $parts[1], $page);
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+            return;
         } elseif ($parts[0] === 'deposits' && in_array($parts[1] ?? '', ['pending', 'approved'], true) && $user?->is_admin) {
             [$text, $keyboard] = $this->depositList($user, $parts[1], $page);
         } else {
@@ -657,7 +970,7 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['لیست معاملات', 'کیف پول و دارایی‌ها'], ['افزایش موجودی انبار']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'لیست معاملات'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $chat ? $this->user($chat) : null;
@@ -673,6 +986,8 @@ class TelegramWebhookController extends Controller
                 $this->showCallbackList($callback);
                 return response()->noContent();
             }
+            if ($user && $this->handleTradeAcceptCallback($callback, $user, $menu)) return response()->noContent();
+            if ($user && $this->handleTradeDeleteCallback($callback, $user, $menu)) return response()->noContent();
             if ($user && $this->handleDeliveryCallback($callback, $user, $menu)) return response()->noContent();
             if ($user && $this->handleFlowCallback($callback, $user, $menu)) return response()->noContent();
             if (str_starts_with((string) ($callback['data'] ?? ''), 'deposit:approve:')) {
@@ -721,8 +1036,11 @@ class TelegramWebhookController extends Controller
         }
         if ($text === 'کیف پول و دارایی‌ها') { $this->send($chat['id'], $this->accountSummary($user), $menu); return response()->noContent(); }
         if ($text === 'معاملات من') {
-            [$myTrades, $keyboard] = $this->myTradeList($user, 1);
-            $keyboard ? $this->sendInline($chat['id'], $myTrades, $keyboard) : $this->send($chat['id'], $myTrades, $menu);
+            $this->sendMyTradeRoomMessages($user, $chat['id'], 1, $menu);
+            return response()->noContent();
+        }
+        if ($text === 'سوابق من') {
+            $this->sendMyTradeRoomHistoryMessages($user, $chat['id'], 1, $menu);
             return response()->noContent();
         }
         if ($photo && ($flow['type'] ?? '') === 'deposit' && ($flow['stage'] ?? '') === 'receipt') {
@@ -765,6 +1083,16 @@ class TelegramWebhookController extends Controller
                 } else {
                     $this->send($chat['id'], 'ارسال درخواست تحویل به سایت ناموفق بود؛ دوباره تلاش کنید.', $menu);
                 }
+            }
+            return response()->noContent();
+        }
+        if (($flow['type'] ?? '') === 'trade_accept' && ($flow['stage'] ?? '') === 'partial_quantity') {
+            $quantity = is_numeric($text) ? (float) $text : 0;
+            if (! Trade::meetsMinimumQuantity('gram', $quantity)) {
+                $this->send($chat['id'], 'برای پذیرش جزئی، مقدار معتبر و حداقل ۱۰۰ گرم وارد کنید.', $menu);
+            } else {
+                $this->clearFlow($user);
+                $this->acceptOffer($user, $chat['id'], (int) ($flow['offer_id'] ?? 0), $quantity, $menu);
             }
             return response()->noContent();
         }
