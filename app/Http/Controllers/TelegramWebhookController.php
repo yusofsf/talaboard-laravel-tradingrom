@@ -758,13 +758,13 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        $rows->each(function (array $trade) use ($chatId, $page) {
-            $this->send($chatId, $this->myOfferText($trade, $page, 'سوابق من'));
-        });
+        $text = $rows
+            ->map(fn (array $trade) => $this->myOfferText($trade, $page, 'سوابق من'))
+            ->join("\n\n────────────\n\n");
 
-        if ($pagination) {
-            $this->sendInline($chatId, "📋 سوابق من — صفحه {$page}", $pagination);
-        }
+        $pagination
+            ? $this->sendInline($chatId, $text, $pagination)
+            : $this->send($chatId, $text, $menu);
     }
 
     private function handleTradeDeleteCallback(array $callback, User $user, array $menu): bool

@@ -226,11 +226,11 @@ class TelegramCallbackTest extends TestCase
             ->filter(fn ($request) => str_contains($request->url(), '/sendMessage')
                 && str_contains((string) $request['text'], '📋 سوابق من'));
 
-        $this->assertCount(2, $messages);
+        $this->assertCount(1, $messages);
         $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'خرید طلا')
             && str_contains((string) $request['text'], 'قیمت واحد: 1,850,000 تومان')
             && str_contains((string) $request['text'], 'وضعیت: پذیرفته‌شده')
-            && ! isset($request['reply_markup'])));
+            && isset($request['reply_markup']['keyboard'])));
         $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'فروش تمام سکه')
             && str_contains((string) $request['text'], 'وضعیت: ردشده')));
     }
