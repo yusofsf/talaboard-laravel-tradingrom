@@ -647,7 +647,10 @@ class TelegramWebhookController extends Controller
         if ($response === null && ! $this->usesMembershipApi() && $user->exists) {
             $query = Trade::query()->latest('traded_at');
             if ($statuses !== null) {
-                $query->whereIn('status', $statuses);
+                $localStatuses = in_array('active', $statuses, true)
+                    ? [...$statuses, 'submitted', 'pending', 'open', 'published', 'available']
+                    : $statuses;
+                $query->whereIn('status', $localStatuses);
             }
             if ($statuses !== null && in_array('accepted', $statuses, true)) {
                 $query->where(fn ($query) => $query->where('user_id', $user->id)->orWhere('accepted_by', $user->id));
@@ -713,7 +716,15 @@ class TelegramWebhookController extends Controller
 
     private function sendMyTradeRoomMessages(User $user, int|string $chatId, int $page, array $menu = []): void
     {
-        [$rows, $pagination, $page] = $this->myTradeRoomList($user, $page);
+        // Only live offers belong in the trade room. Completed and cancelled
+        // offers are shown under "سوابق من" and must not have a delete button.
+        [$rows, $pagination, $page] = $this->myTradeRoomList(
+            $user,
+            $page,
+            ['active'],
+            'trades:mine',
+            false,
+        );
 
         if ($rows->isEmpty()) {
             $this->send($chatId, "📋 معاملات من — صفحه {$page}\n\nمعامله‌ای در اتاق معاملاتی ندارید.", $menu);

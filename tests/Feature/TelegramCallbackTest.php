@@ -152,7 +152,7 @@ class TelegramCallbackTest extends TestCase
             ->filter(fn ($request) => str_contains($request->url(), '/sendMessage')
                 && str_contains((string) $request['text'], '📋 معاملات من'));
 
-        $this->assertCount(3, $messages);
+        $this->assertCount(2, $messages);
         $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'خرید طلا')
             && str_contains((string) $request['text'], 'قیمت واحد: 1,800,000 تومان')
             && str_contains((string) $request['text'], 'وضعیت: فعال')
@@ -160,8 +160,7 @@ class TelegramCallbackTest extends TestCase
             && ($request['reply_markup']['inline_keyboard'][0][0]['callback_data'] ?? null) === 'trade_delete:10'));
         $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'فروش نقره ۹۹۵')
             && ($request['reply_markup']['inline_keyboard'][0][0]['text'] ?? null) === 'حذف'));
-        $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'وضعیت: پذیرفته‌شده')
-            && ($request['reply_markup']['inline_keyboard'][0][0]['callback_data'] ?? null) === 'trade_delete:12'));
+        $this->assertFalse($messages->contains(fn ($request) => str_contains((string) $request['text'], 'وضعیت: پذیرفته‌شده')));
     }
 
     public function test_deleting_my_trade_room_offer_cancels_it_on_the_site_and_removes_the_message(): void
