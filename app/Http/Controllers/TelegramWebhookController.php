@@ -332,7 +332,11 @@ class TelegramWebhookController extends Controller
             'quarter_coin' => 'ربع سکه',
         ];
         $unitLabels = ['gram' => 'گرم', 'mesghal' => 'مثقال', 'piece' => 'عدد', 'count' => 'عدد'];
-        $statusLabels = ['active' => 'فعال', 'submitted' => 'فعال', 'accepted' => 'پذیرفته‌شده', 'rejected' => 'ردشده'];
+        $statusLabels = [
+            'active' => 'فعال', 'submitted' => 'فعال', 'pending' => 'فعال',
+            'open' => 'فعال', 'published' => 'فعال', 'available' => 'فعال',
+            'accepted' => 'پذیرفته‌شده', 'rejected' => 'ردشده',
+        ];
         $unit = (string) ($trade['unit'] ?? $this->tradeUnit($trade));
 
         return [
@@ -400,10 +404,14 @@ class TelegramWebhookController extends Controller
     {
         $perPage = 10;
         $response = $this->siteRequest('trade-room/offers', $user, ['mine' => true, 'status' => count($statuses) === 1 ? $statuses[0] : $statuses]);
-        $trades = collect($response['offers'] ?? $response['trades'] ?? $response ?? [])
+        // The membership endpoint has returned both `offers`/`trades` and
+        // paginated `data` envelopes over time. Accept all of them here so a
+        // valid personal offer is not shown as an empty list.
+        $payload = is_array($response) ? ($response['offers'] ?? $response['trades'] ?? $response['data'] ?? $response['items'] ?? $response) : [];
+        $trades = collect($payload)
             ->filter(fn ($trade) => is_array($trade))
             ->map(fn (array $trade) => $this->normalizeOffer($trade))
-            ->filter(fn (array $trade) => in_array((string) ($trade['status'] ?? ''), $statuses, true))
+            ->filter(fn (array $trade) => $this->tradeStatusMatches($trade['status'] ?? null, $statuses))
             ->sortByDesc(fn (array $trade) => $trade['created_at'] ?? $trade['traded_at'] ?? $trade['id'] ?? 0)
             ->values();
 
@@ -440,6 +448,17 @@ class TelegramWebhookController extends Controller
         ]);
 
         return [$rows, $this->pagination($paginationPrefix, $page, $hasMore), $page];
+    }
+
+    private function tradeStatusMatches(mixed $status, array $statuses): bool
+    {
+        $status = strtolower(trim((string) $status));
+        $status = match ($status) {
+            'pending', 'open', 'published', 'available' => 'active',
+            default => $status,
+        };
+
+        return in_array($status, $statuses, true);
     }
 
     private function myOfferText(array $trade, int $page, string $title = 'معاملات من'): string
