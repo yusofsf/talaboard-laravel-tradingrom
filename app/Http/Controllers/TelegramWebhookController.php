@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\{Cache, DB, Http, Log, Schema, Storage};
 class TelegramWebhookController extends Controller
 {
     private string $traceId = '';
+    private ?string $lastSiteError = null;
 
     private function audit(string $event, array $context = [], string $level = 'info'): void
     {
@@ -124,6 +125,7 @@ class TelegramWebhookController extends Controller
 
     private function membershipRequest(string $endpoint, array $payload): ?array
     {
+        $this->lastSiteError = null;
         $url = rtrim((string) config('services.membership.url'), '/');
         $token = (string) config('services.membership.token');
 
@@ -154,7 +156,14 @@ class TelegramWebhookController extends Controller
             );
             $this->audit('site.response', ['endpoint' => $endpoint, 'status' => $response->status(), 'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000), 'response_keys' => is_array($responsePayload) ? array_keys($responsePayload) : []], $response->successful() ? 'debug' : 'warning');
 
-            return $response->successful() && is_array($responsePayload) ? $responsePayload : null;
+            if (! $response->successful()) {
+                $this->lastSiteError = is_array($responsePayload)
+                    ? (string) ($responsePayload['message'] ?? data_get($responsePayload, 'errors.0.0', 'سایت درخواست را نپذیرفت.'))
+                    : 'سایت درخواست را نپذیرفت.';
+                return null;
+            }
+
+            return is_array($responsePayload) ? $responsePayload : null;
         } catch (\Throwable $exception) {
             Log::channel(config('trading.log_channel', 'trading'))->error('Membership API request failed.', [
                 'endpoint' => $endpoint,
@@ -1172,7 +1181,7 @@ class TelegramWebhookController extends Controller
                 'alias' => $alias,
             ]);
             if (! $siteTrade) {
-                throw new \RuntimeException('Website wallet or asset balance could not be verified.');
+                throw new \RuntimeException($this->lastSiteError ?: 'اعتبار کیف پول یا موجودی دارایی در سایت تأیید نشد.');
             }
             $siteTrade = $siteTrade['offer'] ?? $siteTrade['trade'] ?? $siteTrade;
             $unitPrice = (int) ($siteTrade['unit_price'] ?? $siteTrade['price_per_unit'] ?? $flow['unit_price']);
