@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\PriceSnapshot;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class TalaboardClient
 {
@@ -26,22 +27,32 @@ class TalaboardClient
     {
         $url = config('services.talaboard.url');
         $token = config('services.talaboard.token');
+        $log = Log::channel(config('trading.log_channel', 'trading'));
 
-        if (! $url || ! $token) {
+        $log->debug('Live price request started.', [
+            'base_url' => $url,
+            'configured_path' => config('services.talaboard.prices_path'),
+            'token_configured' => filled($token),
+        ]);
+
+        if (! $url) {
+            $log->warning('Live price API URL is not configured; using stored snapshots.');
             return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
         }
 
         try {
-            $response = Http::acceptJson()->withToken($token)
-                ->withOptions(['verify' => config('services.talaboard.verify_ssl', true)])
-                ->timeout(10)->get(rtrim($url, '/').config('services.talaboard.prices_path'));
-            $response->throw();
-            $items = $this->normalizePrices($response->json());
-        } catch (\Throwable) {
+            $items = $this->fetchPriceItems($url, $token);
+        } catch (\Throwable $exception) {
+            $log->warning('Unable to fetch live Talaboard prices; using the latest snapshots.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+
             // Keep the bot available during a temporary upstream outage.
             return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
         }
 
+        $savedSymbols = [];
         foreach ($items as $key => $item) {
             if (! is_array($item)) continue;
             $symbol = is_string($key) ? $key : ($item['symbol'] ?? null);
@@ -57,9 +68,72 @@ class TalaboardClient
                 'price' => $price,
                 'source_updated_at' => $item['updated_at'] ?? now(),
             ]);
+            $savedSymbols[] = $symbol;
         }
 
-        return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
+        $snapshots = PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
+        $log->info('Live prices processed.', [
+            'received_items' => count($items),
+            'saved_symbols' => array_values(array_unique($savedSymbols)),
+            'available_snapshot_count' => $snapshots->count(),
+        ]);
+
+        return $snapshots;
+    }
+
+    private function fetchPriceItems(string $url, ?string $token): array
+    {
+        $configuredPath = config('services.talaboard.prices_path', '/api/prices');
+        $attempts = [];
+
+        if ($token) {
+            $attempts[] = [$configuredPath, $token];
+        } else {
+            $attempts[] = [$configuredPath, null];
+        }
+
+        // Prices are public. Always retry without Authorization because an old or
+        // invalid site token must not prevent the Telegram bot from showing them.
+        if ($token || $configuredPath !== '/api/prices') {
+            $attempts[] = ['/api/prices', null];
+        }
+
+        foreach ($attempts as [$path, $attemptToken]) {
+            $request = Http::acceptJson()
+                ->withOptions(['verify' => config('services.talaboard.verify_ssl', true)])
+                ->timeout(10);
+
+            if ($attemptToken) {
+                $request = $request->withToken($attemptToken);
+            }
+
+            $endpoint = rtrim($url, '/').$path;
+            Log::channel(config('trading.log_channel', 'trading'))->debug('Calling live price endpoint.', [
+                'endpoint' => $endpoint,
+                'authorization' => $attemptToken ? 'bearer' : 'none',
+            ]);
+            $response = $request->get($endpoint);
+            Log::channel(config('trading.log_channel', 'trading'))->log(
+                $response->successful() ? 'info' : 'warning',
+                'Live price endpoint responded.',
+                [
+                    'endpoint' => $endpoint,
+                    'status' => $response->status(),
+                    'content_type' => $response->header('Content-Type'),
+                    'body_bytes' => strlen($response->body()),
+                ]
+            );
+            if ($response->successful()) {
+                $payload = $response->json();
+                if (! is_array($payload)) {
+                    throw new \UnexpectedValueException('Live price endpoint did not return a JSON object or array.');
+                }
+
+                return $this->normalizePrices($payload);
+            }
+        }
+
+        $response->throw();
     }
 
     private function normalizePrices(array $payload): array

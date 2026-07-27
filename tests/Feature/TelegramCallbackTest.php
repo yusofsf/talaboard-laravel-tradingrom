@@ -70,4 +70,34 @@ class TelegramCallbackTest extends TestCase
             && $request['telegram_user_id'] === '67890'
             && $request['telegram_chat_id'] === '12345');
     }
+
+    public function test_my_trades_shows_the_connected_users_buys_and_sells_without_a_side_prompt(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => true]),
+            'https://talaboard.test/api/telegram/overview' => Http::response(['trades' => [
+                ['id' => 10, 'side' => 'buy', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 100, 'unit_price' => 18_000_000, 'total_price' => 1_800_000_000, 'status' => 'submitted'],
+                ['id' => 11, 'side' => 'sell', 'asset' => 'silver_995', 'unit' => 'gram', 'quantity' => 100, 'unit_price' => 380_000, 'total_price' => 38_000_000, 'status' => 'accepted'],
+            ]]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => 'معاملات من',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'خرید طلا')
+            && str_contains((string) $request['text'], 'فروش نقره ۹۹۵')
+            && ! str_contains((string) $request['text'], 'نوع فهرست را انتخاب کنید'));
+    }
 }

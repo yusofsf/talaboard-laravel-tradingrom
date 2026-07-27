@@ -73,6 +73,14 @@ return [
             'replace_placeholders' => true,
         ],
 
+        'trading' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/trading.log'),
+            'level' => env('TRADING_LOG_LEVEL', 'debug'),
+            'days' => env('TRADING_LOG_DAYS', 14),
+            'replace_placeholders' => true,
+        ],
+
         'slack' => [
             'driver' => 'slack',
             'url' => env('LOG_SLACK_WEBHOOK_URL'),

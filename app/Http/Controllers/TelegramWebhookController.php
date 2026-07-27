@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\{DepositRequest, InventoryDelivery, TelegramState, TelegramUpdate, Trade, User, WalletTransaction};
 use App\Services\{TalaboardClient, TelegramConnectionService};
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\{Cache, DB, Http, Schema, Storage};
+use Illuminate\Support\Facades\{Cache, DB, Http, Log, Schema, Storage};
 
 class TelegramWebhookController extends Controller
 {
@@ -14,6 +14,7 @@ class TelegramWebhookController extends Controller
         $token = config('services.telegram.token');
 
         if (! $token) {
+            Log::channel(config('trading.log_channel', 'trading'))->warning('Telegram API token is not configured.', ['method' => $method]);
             return [];
         }
 
@@ -21,13 +22,25 @@ class TelegramWebhookController extends Controller
             // Telegram expects reply_markup to be a JSON object. When this was
             // sent as form data, nested keyboard arrays were not parsed as a
             // keyboard, so users only saw the "select ..." prompt.
-            return Http::asJson()
+            $response = Http::asJson()
                 ->connectTimeout(5)
                 ->timeout(15)
                 ->withOptions(['force_ip_resolve' => 'v4'])
-                ->post("https://api.telegram.org/bot{$token}/{$method}", $data)
-                ->json() ?? [];
-        } catch (\Throwable) {
+                ->post("https://api.telegram.org/bot{$token}/{$method}", $data);
+            $result = $response->json() ?? [];
+            Log::channel(config('trading.log_channel', 'trading'))->log(
+                $response->successful() && ($result['ok'] ?? true) ? 'debug' : 'warning',
+                'Telegram API responded.',
+                ['method' => $method, 'status' => $response->status(), 'telegram_ok' => $result['ok'] ?? null]
+            );
+
+            return $result;
+        } catch (\Throwable $exception) {
+            Log::channel(config('trading.log_channel', 'trading'))->error('Telegram API request failed.', [
+                'method' => $method,
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
             return [];
         }
     }
@@ -61,14 +74,36 @@ class TelegramWebhookController extends Controller
         $token = (string) config('services.membership.token');
 
         if ($url === '' || $token === '') {
+            Log::channel(config('trading.log_channel', 'trading'))->warning('Membership API is not fully configured.', [
+                'endpoint' => $endpoint,
+                'url_configured' => $url !== '',
+                'token_configured' => $token !== '',
+            ]);
             return null;
         }
 
         try {
             $response = Http::acceptJson()->withToken($token)->timeout(8)->post("{$url}/{$endpoint}", $payload);
 
-            return $response->successful() ? ($response->json() ?? []) : null;
-        } catch (\Throwable) {
+            $responsePayload = $response->json();
+            Log::channel(config('trading.log_channel', 'trading'))->log(
+                $response->successful() ? 'debug' : 'warning',
+                'Membership API responded.',
+                [
+                    'endpoint' => $endpoint,
+                    'status' => $response->status(),
+                    'telegram_chat_id' => $payload['telegram_chat_id'] ?? null,
+                    'response_keys' => is_array($responsePayload) ? array_keys($responsePayload) : [],
+                ]
+            );
+
+            return $response->successful() && is_array($responsePayload) ? $responsePayload : null;
+        } catch (\Throwable $exception) {
+            Log::channel(config('trading.log_channel', 'trading'))->error('Membership API request failed.', [
+                'endpoint' => $endpoint,
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
             return null;
         }
     }
@@ -227,8 +262,16 @@ class TelegramWebhookController extends Controller
     {
         try {
             $rows = $prices->prices();
-        } catch (\Throwable) {
+        } catch (\Throwable $exception) {
+            Log::channel(config('trading.log_channel', 'trading'))->error('Building the live price message failed.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
             return 'دریافت قیمت لحظه‌ای از سایت ناموفق بود؛ لطفاً دوباره تلاش کنید.';
+        }
+
+        if ($rows->isEmpty()) {
+            Log::channel(config('trading.log_channel', 'trading'))->warning('Live price message has no available snapshots.');
         }
 
         $lines = ['💹 قیمت لحظه‌ای سایت (ریال)', ''];
@@ -248,7 +291,7 @@ class TelegramWebhookController extends Controller
         $perPage = 10;
         $response = $this->siteRequest('trade-room/offers', $user);
         $trades = collect($response['offers'] ?? $response['trades'] ?? $response ?? [])
-            ->filter('is_array')
+            ->filter(fn ($trade) => is_array($trade))
             ->filter(fn (array $trade) => ($trade['side'] ?? $trade['type'] ?? null) === $side)
             ->filter(fn (array $trade) => Trade::meetsMinimumQuantity($this->tradeUnit($trade), (float) ($trade['quantity'] ?? 0)))
             ->map(fn (array $trade) => [...$trade, 'item_label' => $trade['item_label'] ?? $trade['asset_label'] ?? $trade['asset'] ?? '—', 'total' => $trade['total'] ?? $trade['total_price'] ?? 0])
@@ -264,6 +307,76 @@ class TelegramWebhookController extends Controller
         $text .= $rows->isEmpty() ? 'موردی وجود ندارد.' : $rows->map(fn (array $t) => "#{$t['id']} | {$t['item_label']}\nمقدار: {$t['quantity']} | کل: ".number_format($t['total']).' | وضعیت: '.($t['status'] ?? 'active'))->join("\n\n");
 
         return [$text, $this->pagination("trades:{$side}", $page, $hasMore)];
+    }
+
+    private function myTradeList(User $user, int $page): array
+    {
+        $perPage = 10;
+        $response = $this->siteRequest('overview', $user);
+
+        if ($response !== null) {
+            $tradesPayload = $response['trades']['data'] ?? $response['trades'] ?? [];
+            $trades = collect(is_array($tradesPayload) ? $tradesPayload : [])->filter(fn ($trade) => is_array($trade));
+            $source = 'membership_api';
+        } elseif ($user->exists) {
+            $trades = $user->trades()->latest('traded_at')->get()->map(fn (Trade $trade) => [
+                'id' => $trade->id,
+                'side' => $trade->side,
+                'asset' => $trade->asset,
+                'unit' => $trade->unit,
+                'quantity' => $trade->quantity,
+                'unit_price' => $trade->unit_price,
+                'total_price' => $trade->total_price,
+                'status' => $trade->status,
+                'traded_at' => $trade->traded_at?->toIso8601String(),
+            ]);
+            $source = 'local_database';
+        } else {
+            $trades = collect();
+            $source = 'unavailable';
+        }
+
+        $trades = $trades->sortByDesc(fn (array $trade) => $trade['traded_at'] ?? $trade['created_at'] ?? $trade['id'] ?? 0)->values();
+        $hasMore = $trades->count() > $page * $perPage;
+        $rows = $trades->slice(($page - 1) * $perPage, $perPage);
+        $assetLabels = [
+            'gold' => 'طلا',
+            'silver_995' => 'نقره ۹۹۵',
+            'silver_999' => 'نقره ۹۹۹.۹',
+            'silver_9999' => 'نقره ۹۹۹.۹',
+            'full_coin' => 'تمام سکه',
+            'half_coin' => 'نیم سکه',
+            'quarter_coin' => 'ربع سکه',
+        ];
+        $unitLabels = ['gram' => 'گرم', 'mesghal' => 'مثقال', 'piece' => 'عدد', 'count' => 'عدد'];
+
+        $text = "📋 معاملات من — صفحه {$page}\n\n";
+        $text .= $rows->isEmpty() ? 'معامله‌ای برای شما ثبت نشده است.' : $rows->map(function (array $trade) use ($assetLabels, $unitLabels) {
+            $side = match ($trade['side'] ?? $trade['type'] ?? '') {
+                'buy' => 'خرید',
+                'sell' => 'فروش',
+                default => 'معامله',
+            };
+            $asset = $assetLabels[$trade['asset'] ?? $trade['item'] ?? ''] ?? ($trade['item_label'] ?? $trade['asset_label'] ?? '—');
+            $unit = $unitLabels[$trade['unit'] ?? ''] ?? ($trade['unit'] ?? '');
+            $quantity = $trade['quantity'] ?? 0;
+            $unitPrice = $trade['unit_price'] ?? $trade['price_per_unit'] ?? 0;
+            $total = $trade['total_price'] ?? $trade['total'] ?? 0;
+            $status = $trade['status'] ?? '—';
+
+            return '#'.($trade['id'] ?? '—')." | {$side} {$asset}\n"
+                ."مقدار: {$quantity} {$unit} | قیمت واحد: ".number_format((float) $unitPrice)."\n"
+                .'مبلغ کل: '.number_format((float) $total)." ریال | وضعیت: {$status}";
+        })->join("\n\n");
+
+        Log::channel(config('trading.log_channel', 'trading'))->info('Personal trades displayed.', [
+            'telegram_chat_id' => $user->telegram_chat_id,
+            'source' => $source,
+            'total_count' => $trades->count(),
+            'page' => $page,
+        ]);
+
+        return [$text, $this->pagination('trades:mine', $page, $hasMore)];
     }
 
     private function depositList(User $admin, string $status, int $page): array
@@ -295,7 +408,9 @@ class TelegramWebhookController extends Controller
             return;
         }
 
-        if ($parts[0] === 'trades' && in_array($parts[1] ?? '', ['buy', 'sell'], true)) {
+        if ($parts[0] === 'trades' && ($parts[1] ?? '') === 'mine') {
+            [$text, $keyboard] = $this->myTradeList($user, $page);
+        } elseif ($parts[0] === 'trades' && in_array($parts[1] ?? '', ['buy', 'sell'], true)) {
             [$text, $keyboard] = $this->tradeList($user, $parts[1], $page);
         } elseif ($parts[0] === 'deposits' && in_array($parts[1] ?? '', ['pending', 'approved'], true) && $user?->is_admin) {
             [$text, $keyboard] = $this->depositList($user, $parts[1], $page);
@@ -542,7 +657,7 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'لیست معاملات'], ['افزایش موجودی انبار', 'کیف پول و دارایی‌ها']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['لیست معاملات', 'کیف پول و دارایی‌ها'], ['افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $chat ? $this->user($chat) : null;
@@ -605,6 +720,11 @@ class TelegramWebhookController extends Controller
             return response()->noContent();
         }
         if ($text === 'کیف پول و دارایی‌ها') { $this->send($chat['id'], $this->accountSummary($user), $menu); return response()->noContent(); }
+        if ($text === 'معاملات من') {
+            [$myTrades, $keyboard] = $this->myTradeList($user, 1);
+            $keyboard ? $this->sendInline($chat['id'], $myTrades, $keyboard) : $this->send($chat['id'], $myTrades, $menu);
+            return response()->noContent();
+        }
         if ($photo && ($flow['type'] ?? '') === 'deposit' && ($flow['stage'] ?? '') === 'receipt') {
             $ok = $this->uploadReceiptToSite($user, (int) $flow['deposit_id'], end($photo));
             if ($ok) {
