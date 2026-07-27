@@ -468,7 +468,9 @@ class TelegramWebhookController extends Controller
         $statusLabels = [
             'active' => 'فعال', 'submitted' => 'فعال', 'pending' => 'فعال',
             'open' => 'فعال', 'published' => 'فعال', 'available' => 'فعال',
-            'accepted' => 'پذیرفته‌شده', 'completed' => 'پذیرفته‌شده', 'rejected' => 'ردشده',
+            'accepted' => 'پذیرفته‌شده', 'completed' => 'پذیرفته‌شده',
+            'rejected' => 'ردشده', 'cancelled' => 'ردشده', 'canceled' => 'ردشده',
+            'expired' => 'ردشده', 'failed' => 'ردشده', 'declined' => 'ردشده',
         ];
         $unit = (string) ($trade['unit'] ?? $this->tradeUnit($trade));
 
@@ -618,11 +620,11 @@ class TelegramWebhookController extends Controller
         }
     }
 
-    private function myTradeRoomList(User $user, int $page, ?array $statuses = null, string $paginationPrefix = 'trades:mine'): array
+    private function myTradeRoomList(User $user, int $page, ?array $statuses = null, string $paginationPrefix = 'trades:mine', bool $filterOnSite = true): array
     {
         $perPage = 10;
         $request = ['mine' => true];
-        if ($statuses !== null) {
+        if ($statuses !== null && $filterOnSite) {
             $request['status'] = count($statuses) === 1 ? $statuses[0] : $statuses;
         }
         $response = $this->siteRequest('trade-room/offers', $user, $request);
@@ -696,6 +698,7 @@ class TelegramWebhookController extends Controller
         $status = match ($status) {
             'pending', 'open', 'published', 'available' => 'active',
             'completed' => 'accepted',
+            'cancelled', 'canceled', 'expired', 'failed', 'declined' => 'rejected',
             default => $status,
         };
 
@@ -742,10 +745,16 @@ class TelegramWebhookController extends Controller
 
     private function sendMyTradeRoomHistoryMessages(User $user, int|string $chatId, int $page, array $menu = []): void
     {
-        [$rows, $pagination, $page] = $this->myTradeRoomList($user, $page, ['accepted'], 'trades:history');
+        [$rows, $pagination, $page] = $this->myTradeRoomList(
+            $user,
+            $page,
+            ['accepted', 'rejected'],
+            'trades:history',
+            false,
+        );
 
         if ($rows->isEmpty()) {
-            $this->send($chatId, "📋 سوابق من — صفحه {$page}\n\nمعامله پذیرفته‌شده‌ای در اتاق معاملاتی ندارید.", $menu);
+            $this->send($chatId, "📋 سوابق من — صفحه {$page}\n\nمعامله نهایی‌شده‌ای در اتاق معاملاتی ندارید.", $menu);
             return;
         }
 

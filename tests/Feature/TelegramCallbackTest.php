@@ -204,6 +204,7 @@ class TelegramCallbackTest extends TestCase
             'https://talaboard.test/api/telegram/trade-room/offers' => Http::response(['offers' => [
                 ['id' => 20, 'side' => 'buy', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 150, 'unit_price' => 18_500_000, 'total_price' => 2_775_000_000, 'status' => 'accepted'],
                 ['id' => 21, 'side' => 'sell', 'asset' => 'silver_995', 'unit' => 'gram', 'quantity' => 100, 'unit_price' => 390_000, 'total_price' => 39_000_000, 'status' => 'active'],
+                ['id' => 22, 'side' => 'sell', 'asset' => 'full_coin', 'unit' => 'piece', 'quantity' => 1, 'unit_price' => 700_000_000, 'total_price' => 700_000_000, 'status' => 'cancelled'],
             ]]),
             'https://api.telegram.org/*' => Http::response(['ok' => true]),
         ]);
@@ -219,17 +220,19 @@ class TelegramCallbackTest extends TestCase
         Http::assertSent(fn ($request) => $request->url() === 'https://talaboard.test/api/telegram/trade-room/offers'
             && $request['telegram_chat_id'] === '12345'
             && $request['mine'] === true
-            && $request['status'] === 'accepted');
+            && ! isset($request['status']));
 
         $messages = collect(Http::recorded())->pluck(0)
             ->filter(fn ($request) => str_contains($request->url(), '/sendMessage')
                 && str_contains((string) $request['text'], '📋 سوابق من'));
 
-        $this->assertCount(1, $messages);
+        $this->assertCount(2, $messages);
         $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'خرید طلا')
             && str_contains((string) $request['text'], 'قیمت واحد: 1,850,000 تومان')
             && str_contains((string) $request['text'], 'وضعیت: پذیرفته‌شده')
             && ! isset($request['reply_markup'])));
+        $this->assertTrue($messages->contains(fn ($request) => str_contains((string) $request['text'], 'فروش تمام سکه')
+            && str_contains((string) $request['text'], 'وضعیت: ردشده')));
     }
 
     public function test_created_trade_is_published_to_its_asset_channel(): void
