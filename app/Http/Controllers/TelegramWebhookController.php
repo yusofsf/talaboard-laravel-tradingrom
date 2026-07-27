@@ -506,6 +506,28 @@ class TelegramWebhookController extends Controller
         return filled($channel) ? $channel : null;
     }
 
+    private function tradeChannelsText(): string
+    {
+        $channels = [
+            'اتاق طلا' => config('services.telegram.channels.gold'),
+            'اتاق نقره ۹۹۵' => config('services.telegram.channels.silver_995'),
+            'اتاق نقره ۹۹۹/۹' => config('services.telegram.channels.silver_999'),
+        ];
+        $lines = ['📣 کانال‌های خرید و فروش'];
+        foreach ($channels as $label => $channel) {
+            $value = trim((string) $channel);
+            if ($value === '') {
+                $lines[] = "{$label}: تنظیم نشده";
+                continue;
+            }
+            $url = str_starts_with($value, '@')
+                ? 'https://t.me/'.ltrim($value, '@')
+                : (preg_match('/^https?:\\/\\//i', $value) ? $value : null);
+            $lines[] = $url ? "{$label}: {$url}" : "{$label}: {$value}";
+        }
+        return implode("\n", $lines);
+    }
+
     private function publishOfferToChannel(array $trade): bool
     {
         $trade = $this->normalizeOffer($trade);
@@ -603,6 +625,21 @@ class TelegramWebhookController extends Controller
             ->when($statuses !== null, fn ($trades) => $trades->filter(fn (array $trade) => $this->tradeStatusMatches($trade['status'] ?? null, $statuses)))
             ->sortByDesc(fn (array $trade) => $trade['created_at'] ?? $trade['traded_at'] ?? $trade['id'] ?? 0)
             ->values();
+
+        // Some deployed website versions returned an empty filtered envelope
+        // for `status=accepted` even though the user's completed offers were
+        // present. Retry once without the status filter and apply the same
+        // filter locally so history remains visible during rollout.
+        if ($statuses !== null && $trades->isEmpty() && $response !== null) {
+            $fallback = $this->siteRequest('trade-room/offers', $user, ['mine' => true]);
+            $fallbackPayload = is_array($fallback) ? ($fallback['offers'] ?? $fallback['trades'] ?? $fallback['data'] ?? $fallback['items'] ?? $fallback) : [];
+            $trades = collect($fallbackPayload)
+                ->filter(fn ($trade) => is_array($trade))
+                ->map(fn (array $trade) => $this->normalizeOffer($trade))
+                ->filter(fn (array $trade) => $this->tradeStatusMatches($trade['status'] ?? null, $statuses))
+                ->sortByDesc(fn (array $trade) => $trade['created_at'] ?? $trade['traded_at'] ?? $trade['id'] ?? 0)
+                ->values();
+        }
 
         if ($response === null && ! $this->usesMembershipApi() && $user->exists) {
             $query = Trade::query()->latest('traded_at');
@@ -1376,7 +1413,7 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['عضویت ویژه', 'کیف پول و دارایی‌ها'], ['افزایش موجودی انبار']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['وضعیت حساب', 'کانال‌های خرید و فروش'], ['عضویت ویژه', 'کیف پول و دارایی‌ها'], ['افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
@@ -1483,7 +1520,8 @@ class TelegramWebhookController extends Controller
             $this->sendInline($chat['id'], "شماره کارت: ".config('trading.card_number')."\nشماره حساب: ".config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینهٔ زیر را بزنید تا مبلغ و تصویر فیش را ارسال کنید.", [[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]);
             return response()->noContent();
         }
-        if ($text === 'کیف پول و دارایی‌ها') { $this->send($chat['id'], $this->accountSummary($user), $menu); return response()->noContent(); }
+        if ($text === 'کیف پول و دارایی‌ها' || $text === 'وضعیت حساب') { $this->send($chat['id'], $this->accountSummary($user), $menu); return response()->noContent(); }
+        if ($text === 'کانال‌های خرید و فروش') { $this->send($chat['id'], $this->tradeChannelsText(), $menu); return response()->noContent(); }
         if ($text === 'معاملات من') {
             if (! $this->hasVipAccess($user)) { $this->sendMembershipPrompt($chat['id'], $menu); return response()->noContent(); }
             $this->sendMyTradeRoomMessages($user, $chat['id'], 1, $menu);
