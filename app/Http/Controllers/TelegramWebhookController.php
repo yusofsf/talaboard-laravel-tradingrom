@@ -943,8 +943,22 @@ class TelegramWebhookController extends Controller
             return true;
         }
 
+        if (! $this->hasConnectedAccess($user)) {
+            $this->api('answerCallbackQuery', [
+                'callback_query_id' => $callback['id'],
+                'text' => 'برای پذیرش معامله، ابتدا در سایت ثبت‌نام و عضویت ویژه را فعال کنید. سپس ربات را Start کنید، کد اتصال را از پروفایل سایت بگیرید و با /connect کد را ارسال کنید.',
+                'show_alert' => true,
+            ]);
+            return true;
+        }
+
         if (! $this->hasVipAccess($user)) {
-            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'برای پذیرش معامله، عضویت ویژه سایت لازم است.', 'show_alert' => true]);
+            $this->api('answerCallbackQuery', [
+                'callback_query_id' => $callback['id'],
+                'text' => 'برای پذیرش معامله، عضویت ویژه سایت لازم است. لینک ثبت‌نام در پیام خصوصی ربات ارسال شد.',
+                'show_alert' => true,
+            ]);
+            $this->sendMembershipPrompt($user->telegram_chat_id, []);
             return true;
         }
 

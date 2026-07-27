@@ -389,6 +389,34 @@ class TelegramCallbackTest extends TestCase
         Http::assertNotSent(fn ($request) => str_contains($request->url(), '/offers/23/accept'));
     }
 
+    public function test_unconnected_acceptor_is_told_to_register_and_connect_before_accepting(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => false, 'vip' => false]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'unconnected-acceptor',
+                'data' => 'trade_accept:full:23',
+                'from' => ['id' => 77777],
+                'message' => ['message_id' => 77, 'chat' => ['id' => '@gold_room']],
+            ],
+        ])->assertNoContent();
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/offers/23/accept'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/answerCallbackQuery')
+            && str_contains((string) $request['text'], 'ثبت‌نام')
+            && str_contains((string) $request['text'], '/connect')
+            && $request['show_alert'] === true);
+    }
+
     public function test_connected_non_vip_user_cannot_use_trading(): void
     {
         config([
