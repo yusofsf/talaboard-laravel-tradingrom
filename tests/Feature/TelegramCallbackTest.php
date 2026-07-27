@@ -8,7 +8,7 @@ use Tests\TestCase;
 
 class TelegramCallbackTest extends TestCase
 {
-    public function test_main_menu_places_wallet_and_assets_next_to_inventory_and_hides_account_status(): void
+    public function test_main_menu_places_membership_registration_next_to_trade_channels(): void
     {
         config(['services.telegram.token' => 'test-token']);
         Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
@@ -28,9 +28,31 @@ class TelegramCallbackTest extends TestCase
 
             $keyboard = $request['reply_markup']['keyboard'] ?? [];
 
-            return in_array(['کیف پول و دارایی‌ها', 'افزایش موجودی انبار'], $keyboard, true)
+            return in_array(['کانال‌های خرید و فروش', 'ثبت نام عضویت ویژه'], $keyboard, true)
+                && in_array(['کیف پول و دارایی‌ها', 'افزایش موجودی انبار'], $keyboard, true)
                 && ! collect($keyboard)->flatten()->contains('وضعیت حساب');
         });
+    }
+
+    public function test_membership_registration_option_links_to_the_site_membership_page(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.web_url' => 'https://talaboard.test/membership',
+        ]);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => 'ثبت نام عضویت ویژه',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && ($request['reply_markup']['inline_keyboard'][0][0]['text'] ?? null) === 'ثبت نام عضویت ویژه'
+            && ($request['reply_markup']['inline_keyboard'][0][0]['url'] ?? null) === 'https://talaboard.test/membership');
     }
 
     public function test_paid_deposit_callback_starts_the_amount_flow(): void

@@ -265,7 +265,7 @@ class TelegramWebhookController extends Controller
     private function sendMembershipPrompt($chat, array $menu): void
     {
         $url = $this->membershipUrl();
-        $keyboard = $url !== '' ? [[['text' => 'درخواست عضویت ویژه', 'url' => $url]]] : [];
+        $keyboard = $url !== '' ? [[['text' => 'ثبت نام عضویت ویژه', 'url' => $url]]] : [];
         if ($keyboard) {
             $this->sendInline($chat, 'برای ثبت یا پذیرش معامله، عضویت ویژه سایت لازم است. درخواست خود را در سایت ارسال کنید.', $keyboard);
         } else {
@@ -280,7 +280,7 @@ class TelegramWebhookController extends Controller
         }
 
         return array_values(array_filter(array_map(
-            static fn (array $row): array => array_values(array_filter($row, static fn (string $item): bool => $item !== 'عضویت ویژه')),
+            static fn (array $row): array => array_values(array_filter($row, static fn (string $item): bool => ! in_array($item, ['ثبت نام عضویت ویژه', 'عضویت ویژه'], true))),
             $menu,
         )));
     }
@@ -1424,7 +1424,7 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['کانال‌های خرید و فروش', 'عضویت ویژه'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['کانال‌های خرید و فروش', 'ثبت نام عضویت ویژه'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
@@ -1494,7 +1494,7 @@ class TelegramWebhookController extends Controller
             return response()->noContent();
         }
         if (str_starts_with($text, '/connect')) { $this->send($chat['id'], "فرمت صحیح: /connect CODE\n\nCODE باید کد ۶ رقمی ساخته‌شده در پروفایل سایت باشد و تا ۱۰ دقیقه اعتبار دارد.", $menu); return response()->noContent(); }
-        if ($text === 'عضویت ویژه') {
+        if (in_array($text, ['ثبت نام عضویت ویژه', 'عضویت ویژه'], true)) {
             $this->sendMembershipPrompt($chat['id'], $menu);
             return response()->noContent();
         }
