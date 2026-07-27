@@ -264,6 +264,15 @@ class TelegramWebhookController extends Controller
         }
     }
 
+    private function menuForMembership(User $user, array $menu): array
+    {
+        if (! $this->hasVipAccess($user)) {
+            return $menu;
+        }
+
+        return array_values(array_filter($menu, static fn (array $row): bool => ! in_array('عضویت ویژه', $row, true)));
+    }
+
     private function linkWebsiteAccount(User $user, string $code): ?array
     {
         return $this->membershipRequest('link', [
@@ -1309,6 +1318,9 @@ class TelegramWebhookController extends Controller
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
+            if ($user) {
+                $menu = $this->menuForMembership($user, $menu);
+            }
             $callbackData = (string) ($callback['data'] ?? '');
             $this->audit('callback.received', ['callback_id' => $callback['id'] ?? null, 'data' => $callbackData, 'chat_id' => $chat['id'] ?? null, 'from_id' => data_get($callback, 'from.id')]);
             if ($user && $callbackData === 'flow:deposit:paid') {
@@ -1336,7 +1348,7 @@ class TelegramWebhookController extends Controller
 
         $message = $request->input('message');
         if (! $message) return response()->noContent();
-        $chat = $message['chat']; $user = $this->user($chat); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
+        $chat = $message['chat']; $user = $this->user($chat); $menu = $this->menuForMembership($user, $menu); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
         $this->audit('message.received', ['chat_id' => $chat['id'] ?? null, 'from_id' => data_get($message, 'from.id'), 'text' => $text, 'has_photo' => (bool) $photo]);
         if (preg_match('/^\/connect\s+(\d{6})$/', $text, $matches)) {
             try {
