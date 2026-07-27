@@ -279,7 +279,10 @@ class TelegramWebhookController extends Controller
             return $menu;
         }
 
-        return array_values(array_filter($menu, static fn (array $row): bool => ! in_array('عضویت ویژه', $row, true)));
+        return array_values(array_filter(array_map(
+            static fn (array $row): array => array_values(array_filter($row, static fn (string $item): bool => $item !== 'عضویت ویژه')),
+            $menu,
+        )));
     }
 
     private function linkWebsiteAccount(User $user, string $code): ?array
@@ -454,7 +457,7 @@ class TelegramWebhookController extends Controller
         $statusLabels = [
             'active' => 'فعال', 'submitted' => 'فعال', 'pending' => 'فعال',
             'open' => 'فعال', 'published' => 'فعال', 'available' => 'فعال',
-            'accepted' => 'پذیرفته‌شده', 'rejected' => 'ردشده',
+            'accepted' => 'پذیرفته‌شده', 'completed' => 'پذیرفته‌شده', 'rejected' => 'ردشده',
         ];
         $unit = (string) ($trade['unit'] ?? $this->tradeUnit($trade));
 
@@ -644,6 +647,7 @@ class TelegramWebhookController extends Controller
         $status = strtolower(trim((string) $status));
         $status = match ($status) {
             'pending', 'open', 'published', 'available' => 'active',
+            'completed' => 'accepted',
             default => $status,
         };
 
@@ -1145,7 +1149,13 @@ class TelegramWebhookController extends Controller
             'ربع سکه' => ['quarter_coin', 'عدد'],
         ];
 
-        $lines = ['💳 کیف پول: '.number_format($wallet).' تومان', '', '📦 دارایی‌ها:'];
+        $collateral = (int) ($overview['asset_collateral_available'] ?? $overview['collateral_available'] ?? 0);
+        $lines = ['💳 کیف پول: '.number_format($wallet).' تومان'];
+        if ($collateral > 0) {
+            $lines[] = '🧾 اعتبار بیعانه دارایی: '.number_format($collateral).' تومان';
+        }
+        $lines[] = '';
+        $lines[] = '📦 دارایی‌ها:';
         foreach ($metals as $label => [$key, $unit]) {
             $lines[] = $label.': '.rtrim(rtrim(number_format($quantity($key), 3, '.', ''), '0'), '.').' '.$unit;
         }
@@ -1310,6 +1320,49 @@ class TelegramWebhookController extends Controller
         return false;
     }
 
+    private function handleAssetCollateralCallback(array $callback, User $user, array $menu): bool
+    {
+        $data = (string) ($callback['data'] ?? '');
+        if (! str_starts_with($data, 'flow:collateral:')) {
+            return false;
+        }
+
+        $chat = $callback['message']['chat'];
+        $parts = explode(':', $data);
+        $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+
+        if ($data === 'flow:collateral:start') {
+            $this->saveFlow($user, ['type' => 'collateral', 'stage' => 'asset']);
+            $this->sendInline($chat['id'], 'دارایی بیعانه را انتخاب کنید:', $this->assetKeyboard('flow:collateral:asset'));
+            return true;
+        }
+
+        if (($parts[2] ?? '') === 'asset') {
+            $flow = ['type' => 'collateral', 'stage' => 'unit', 'asset' => $parts[3] ?? ''];
+            if ($this->isCoin($flow['asset'])) {
+                $flow['unit'] = 'count';
+                $flow['stage'] = 'quantity';
+                $this->saveFlow($user, $flow);
+                $this->send($chat['id'], 'تعداد سکه بیعانه را وارد کنید.', $menu);
+            } else {
+                $this->saveFlow($user, $flow);
+                $this->sendInline($chat['id'], 'واحد وزن بیعانه را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:collateral:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:collateral:unit:mesghal']]]);
+            }
+            return true;
+        }
+
+        if (($parts[2] ?? '') === 'unit') {
+            $flow = $this->flow($user);
+            $flow['unit'] = $parts[3] ?? '';
+            $flow['stage'] = 'quantity';
+            $this->saveFlow($user, $flow);
+            $this->send($chat['id'], 'مقدار بیعانه را وارد کنید.', $menu);
+            return true;
+        }
+
+        return false;
+    }
+
     public function __invoke(Request $request, TalaboardClient $prices, TelegramConnectionService $connections)
     {
         $this->traceId = (string) str()->uuid();
@@ -1323,7 +1376,7 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['عضویت ویژه', 'وضعیت حساب'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['عضویت ویژه', 'کیف پول و دارایی‌ها'], ['افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
@@ -1346,6 +1399,7 @@ class TelegramWebhookController extends Controller
             if ($user && $this->handleTradeAcceptCallback($callback, $user, $menu)) return response()->noContent();
             if ($user && $this->handleTradeDeleteCallback($callback, $user, $menu)) return response()->noContent();
             if ($user && $this->handleDeliveryCallback($callback, $user, $menu)) return response()->noContent();
+            if ($user && $this->handleAssetCollateralCallback($callback, $user, $menu)) return response()->noContent();
             if ($user && $this->handleFlowCallback($callback, $user, $menu)) return response()->noContent();
             if (str_starts_with((string) ($callback['data'] ?? ''), 'deposit:approve:')) {
                 $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'تأیید فیش فقط از پنل مدیریت سایت انجام می‌شود.', 'show_alert' => true]);
@@ -1396,7 +1450,7 @@ class TelegramWebhookController extends Controller
             $this->sendMembershipPrompt($chat['id'], $menu);
             return response()->noContent();
         }
-        if ($text === 'وضعیت من' || $text === 'وضعیت حساب') {
+        if ($text === 'وضعیت من' || $text === 'وضعیت حساب' || $text === 'وضعیت عضویت') {
             $membership = $this->siteMembership($user);
             $status = (bool) ($membership['vip'] ?? false) || (int) ($membership['membership_level'] ?? 0) >= 2
                 ? 'عضو ویژه'
@@ -1419,6 +1473,10 @@ class TelegramWebhookController extends Controller
         if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
         if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {
             $this->sendInline($chat['id'], 'دارایی تحویلی را انتخاب کنید. پس از ثبت، درخواست تحویل به فروشگاه برای تأیید یا رد ادمین ارسال می‌شود.', [[['text' => 'تحویل به فروشگاه', 'callback_data' => 'flow:delivery:start']]]);
+            return response()->noContent();
+        }
+        if ($text === 'بیعانه دارایی') {
+            $this->sendInline($chat['id'], 'برای بیعانه، دارایی را انتخاب کنید. پس از ثبت، ادمین در سایت سقف مجاز معامله را برای این بیعانه تعیین می‌کند.', [[['text' => 'ثبت بیعانه دارایی', 'callback_data' => 'flow:collateral:start']]]);
             return response()->noContent();
         }
         if ($text === 'واریز وجه' || $text === 'شارژ کیف پول') {
@@ -1480,6 +1538,23 @@ class TelegramWebhookController extends Controller
                     $this->send($chat['id'], 'درخواست تحویل دارایی به سایت ارسال شد و در انتظار تأیید فروشگاه است.', $menu);
                 } else {
                     $this->send($chat['id'], 'ارسال درخواست تحویل به سایت ناموفق بود؛ دوباره تلاش کنید.', $menu);
+                }
+            }
+            return response()->noContent();
+        }
+        if (($flow['type'] ?? '') === 'collateral' && ($flow['stage'] ?? '') === 'quantity') {
+            if (! is_numeric($text) || (float) $text <= 0) {
+                $this->send($chat['id'], 'مقدار معتبر بیعانه را وارد کنید.', $menu);
+            } else {
+                $collateral = $this->siteRequest('asset-collaterals', $user, [
+                    'asset' => $this->siteAsset($flow['asset']),
+                    'quantity' => $this->inventoryQuantity($flow['unit'], $flow['asset'], (float) $text),
+                ]);
+                if ($collateral) {
+                    $this->clearFlow($user);
+                    $this->send($chat['id'], 'درخواست بیعانه دارایی در سایت ثبت شد. پس از تأیید و تعیین سقف معامله توسط ادمین، برای معاملات قابل استفاده است.', $menu);
+                } else {
+                    $this->send($chat['id'], 'ثبت درخواست بیعانه در سایت ناموفق بود؛ دوباره تلاش کنید.', $menu);
                 }
             }
             return response()->noContent();
