@@ -412,9 +412,10 @@ class TelegramWebhookController extends Controller
     private function formatLivePrice(string $symbol, float $price): string
     {
         // The live price feed stores gold/coin values one decimal place below
-        // the displayed toman value, while silver is three zeroes below it.
+        // the displayed toman value. Silver is already in the target toman
+        // scale; applying the old extra multiplier added two zeroes.
         // Keep trade prices on the normal rial-to-toman formatter above.
-        $value = str_starts_with($symbol, 'silver_') ? $price * 100 : $price;
+        $value = $price;
         return number_format($value, 0, '.', ',');
     }
 
@@ -1423,7 +1424,7 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['وضعیت حساب', 'کانال‌های خرید و فروش'], ['عضویت ویژه', 'کیف پول و دارایی‌ها'], ['افزایش موجودی انبار']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['کانال‌های خرید و فروش', 'عضویت ویژه'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
