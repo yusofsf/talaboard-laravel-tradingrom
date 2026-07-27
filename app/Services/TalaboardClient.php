@@ -65,7 +65,9 @@ class TalaboardClient
             PriceSnapshot::create([
                 'symbol' => $symbol,
                 'title' => self::PRODUCTS[$symbol],
-                'price' => $price,
+                // Metalsp publishes prices in toman, while every trading
+                // amount in this application is stored in rial.
+                'price' => (int) round((float) $price * 10),
                 'source_updated_at' => $item['updated_at'] ?? now(),
             ]);
             $savedSymbols[] = $symbol;

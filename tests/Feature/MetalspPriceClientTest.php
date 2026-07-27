@@ -22,9 +22,9 @@ class MetalspPriceClientTest extends TestCase
 
         $prices = app(TalaboardClient::class)->prices();
 
-        $this->assertSame('75000000', $prices->get('gold_gram')->price);
-        $this->assertSame('5950000', $prices->get('silver_995_mesghal')->price);
-        $this->assertSame('850000000', $prices->get('full_coin')->price);
+        $this->assertSame('750000000', $prices->get('gold_gram')->price);
+        $this->assertSame('59500000', $prices->get('silver_995_mesghal')->price);
+        $this->assertSame('8500000000', $prices->get('full_coin')->price);
         Http::assertSent(fn ($request) => $request->hasHeader('Authorization', 'Bearer site-token'));
     }
 
@@ -43,13 +43,13 @@ class MetalspPriceClientTest extends TestCase
 
         $prices = app(TalaboardClient::class)->prices();
 
-        $this->assertSame('17882778', $prices->get('gold_gram')->price);
-        $this->assertSame('77464620', $prices->get('gold_mesghal')->price);
-        $this->assertSame('365000', $prices->get('silver_995_gram')->price);
-        $this->assertSame('375000', $prices->get('silver_9999_gram')->price);
-        $this->assertSame('179508300', $prices->get('full_coin')->price);
-        $this->assertSame('92184000', $prices->get('half_coin')->price);
-        $this->assertSame('51001800', $prices->get('quarter_coin')->price);
+        $this->assertSame('178827780', $prices->get('gold_gram')->price);
+        $this->assertSame('774646200', $prices->get('gold_mesghal')->price);
+        $this->assertSame('3650000', $prices->get('silver_995_gram')->price);
+        $this->assertSame('3750000', $prices->get('silver_9999_gram')->price);
+        $this->assertSame('1795083000', $prices->get('full_coin')->price);
+        $this->assertSame('921840000', $prices->get('half_coin')->price);
+        $this->assertSame('510018000', $prices->get('quarter_coin')->price);
     }
 
     public function test_it_fetches_public_prices_without_a_token(): void
@@ -65,7 +65,7 @@ class MetalspPriceClientTest extends TestCase
 
         $prices = app(TalaboardClient::class)->prices();
 
-        $this->assertSame('17882778', $prices->get('gold_gram')->price);
+        $this->assertSame('178827780', $prices->get('gold_gram')->price);
         Http::assertSent(fn ($request) => ! $request->hasHeader('Authorization'));
     }
 
@@ -85,7 +85,7 @@ class MetalspPriceClientTest extends TestCase
 
         $prices = app(TalaboardClient::class)->prices();
 
-        $this->assertSame('17882778', $prices->get('gold_gram')->price);
+        $this->assertSame('178827780', $prices->get('gold_gram')->price);
         Http::assertSentCount(2);
         Http::assertSent(fn ($request) => $request->url() === 'https://site.test/api/prices'
             && ! $request->hasHeader('Authorization'));
@@ -106,7 +106,7 @@ class MetalspPriceClientTest extends TestCase
 
         $prices = app(TalaboardClient::class)->prices();
 
-        $this->assertSame('17882778', $prices->get('gold_gram')->price);
+        $this->assertSame('178827780', $prices->get('gold_gram')->price);
         Http::assertSentCount(2);
     }
 }

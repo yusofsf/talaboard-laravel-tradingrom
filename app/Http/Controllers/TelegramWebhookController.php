@@ -399,7 +399,7 @@ class TelegramWebhookController extends Controller
         $lines = ['💹 قیمت لحظه‌ای سایت (تومان)', ''];
         foreach (TalaboardClient::PRODUCTS as $symbol => $label) {
             $price = $rows->get($symbol)?->price;
-            $formatted = $price ? $this->formatLivePrice($symbol, (float) $price) : '—';
+            $formatted = $price ? $this->formatToman((float) $price) : '—';
             $lines[] = (TalaboardClient::PRODUCT_ICONS[$symbol] ?? '▫️').' '.$label.': '.$formatted.' تومان';
         }
 
@@ -407,16 +407,6 @@ class TelegramWebhookController extends Controller
         $lines[] = 'به‌روزرسانی: '.now(config('trading.timezone'))->format('H:i:s');
 
         return implode("\n", $lines);
-    }
-
-    private function formatLivePrice(string $symbol, float $price): string
-    {
-        // The live price feed stores gold/coin values one decimal place below
-        // the displayed toman value. Silver is already in the target toman
-        // scale; applying the old extra multiplier added two zeroes.
-        // Keep trade prices on the normal rial-to-toman formatter above.
-        $value = $price;
-        return number_format($value, 0, '.', ',');
     }
 
     private function tradeList(User $user, string $side, int $page): array
