@@ -181,40 +181,42 @@ class TelegramCallbackTest extends TestCase
             && ! isset($request['reply_markup'])));
     }
 
-    public function test_public_trade_list_sends_each_offer_separately_with_accept_buttons(): void
+    public function test_created_trade_is_published_to_its_asset_channel(): void
     {
         config([
             'services.telegram.token' => 'test-token',
             'services.membership.url' => 'https://talaboard.test/api/telegram',
             'services.membership.token' => 'shared-secret',
+            'services.telegram.channels.gold' => '@gold_room',
+        ]);
+        Cache::put('telegram-flow:12345', [
+            'type' => 'trade', 'stage' => 'price', 'side' => 'sell', 'asset' => 'gold',
+            'unit' => 'gram', 'quantity' => 100, 'unit_price' => 18_167_293,
         ]);
         Http::fake([
             'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => true]),
-            'https://talaboard.test/api/telegram/trade-room/offers' => Http::response(['offers' => [
-                ['id' => 23, 'side' => 'sell', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 100, 'unit_price' => 18_167_293, 'total_price' => 1_816_729_300, 'status' => 'active'],
-                ['id' => 24, 'side' => 'sell', 'asset' => 'silver_995', 'unit' => 'gram', 'quantity' => 200, 'unit_price' => 390_000, 'total_price' => 78_000_000, 'status' => 'active'],
-            ]]),
-            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+            'https://talaboard.test/api/telegram/trade-room/offers/create' => Http::response([
+                'id' => 23, 'side' => 'sell', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 100,
+                'unit_price' => 18_167_293, 'total_price' => 1_816_729_300, 'status' => 'active',
+            ]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 77]]),
         ]);
 
         $this->postJson('/api/telegram/webhook', [
             'callback_query' => [
                 'id' => 'callback-id',
-                'data' => 'trades:sell:1',
+                'data' => 'flow:trade:price:default',
+                'from' => ['id' => 12345],
                 'message' => ['message_id' => 55, 'chat' => ['id' => 12345]],
             ],
         ])->assertNoContent();
 
-        $offerMessages = collect(Http::recorded())
-            ->pluck(0)
-            ->filter(fn ($request) => str_contains($request->url(), '/sendMessage') && str_contains((string) $request['text'], 'لیست فروش — صفحه 1'));
-
-        $this->assertCount(2, $offerMessages);
-        $this->assertTrue($offerMessages->contains(fn ($request) => str_contains((string) $request['text'], "طلا\n")
-            && ! str_contains((string) $request['text'], '#23')
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['chat_id'] === '@gold_room'
+            && str_contains((string) $request['text'], 'نام مستعار: کاربر')
             && str_contains((string) $request['text'], 'قیمت واحد: 18,167,293 ریال')
             && ($request['reply_markup']['inline_keyboard'][0][0]['callback_data'] ?? null) === 'trade_accept:full:23'
-            && ($request['reply_markup']['inline_keyboard'][0][1]['callback_data'] ?? null) === 'trade_accept:partial:23'));
+            && ($request['reply_markup']['inline_keyboard'][0][1]['callback_data'] ?? null) === 'trade_accept:partial:23');
     }
 
     public function test_accept_full_offer_posts_the_acceptance_to_the_site(): void
@@ -224,7 +226,12 @@ class TelegramCallbackTest extends TestCase
             'services.membership.url' => 'https://talaboard.test/api/telegram',
             'services.membership.token' => 'shared-secret',
         ]);
+        Cache::put('telegram-offer-message:23', [
+            'channel_id' => '@gold_room', 'message_id' => 77,
+            'offer' => ['id' => 23, 'side' => 'sell', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 100, 'unit_price' => 18_000_000],
+        ]);
         Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true]),
             'https://talaboard.test/api/telegram/trade-room/offers/23/accept' => Http::response(['accepted' => true]),
             'https://api.telegram.org/*' => Http::response(['ok' => true]),
         ]);
@@ -233,7 +240,8 @@ class TelegramCallbackTest extends TestCase
             'callback_query' => [
                 'id' => 'callback-id',
                 'data' => 'trade_accept:full:23',
-                'message' => ['chat' => ['id' => 12345]],
+                'from' => ['id' => 12345],
+                'message' => ['message_id' => 77, 'chat' => ['id' => '@gold_room']],
             ],
         ])->assertNoContent();
 
@@ -241,6 +249,9 @@ class TelegramCallbackTest extends TestCase
             && $request['telegram_chat_id'] === '12345'
             && $request['offer_id'] === 23
             && ! isset($request['quantity']));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/deleteMessage')
+            && $request['chat_id'] === '@gold_room'
+            && $request['message_id'] === 77);
     }
 
     public function test_accept_partial_offer_uses_the_entered_quantity(): void
@@ -250,21 +261,30 @@ class TelegramCallbackTest extends TestCase
             'services.membership.url' => 'https://talaboard.test/api/telegram',
             'services.membership.token' => 'shared-secret',
         ]);
+        Cache::put('telegram-offer-message:23', [
+            'channel_id' => '@gold_room', 'message_id' => 77,
+            'offer' => ['id' => 23, 'side' => 'sell', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 250, 'unit_price' => 18_000_000, 'alias' => 'بازرگان'],
+        ]);
+        config(['services.telegram.channels.gold' => '@gold_room']);
         Http::fake([
-            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => true]),
-            'https://talaboard.test/api/telegram/trade-room/offers/23/accept' => Http::response(['accepted' => true]),
-            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true]),
+            'https://talaboard.test/api/telegram/trade-room/offers/23/accept' => Http::response(['accepted' => true, 'remaining_quantity' => 150]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 88]]),
         ]);
 
         $this->postJson('/api/telegram/webhook', [
             'callback_query' => [
                 'id' => 'callback-id',
                 'data' => 'trade_accept:partial:23',
-                'message' => ['chat' => ['id' => 12345]],
+                'from' => ['id' => 12345],
+                'message' => ['message_id' => 77, 'chat' => ['id' => '@gold_room']],
             ],
         ])->assertNoContent();
 
-        $this->assertSame(['type' => 'trade_accept', 'stage' => 'partial_quantity', 'offer_id' => 23], Cache::get('telegram-flow:12345'));
+        $flow = Cache::get('telegram-flow:12345');
+        $this->assertSame('trade_accept', $flow['type']);
+        $this->assertSame(23, $flow['offer_id']);
+        $this->assertNotEmpty($flow['acceptance_token']);
 
         $this->postJson('/api/telegram/webhook', [
             'message' => [
@@ -278,5 +298,71 @@ class TelegramCallbackTest extends TestCase
             && $request['telegram_chat_id'] === '12345'
             && $request['offer_id'] === 23
             && $request['quantity'] === 100.0);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/deleteMessage') && $request['message_id'] === 77);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['chat_id'] === '@gold_room'
+            && str_contains((string) $request['text'], 'مقدار: 150 گرم'));
+    }
+
+    public function test_second_acceptor_is_told_the_offer_is_in_progress(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Cache::put('telegram-linked:22222', true, now()->addMinute());
+        Cache::put('telegram-offer-processing:23', 'first-user-token', now()->addMinutes(5));
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'second-callback',
+                'data' => 'trade_accept:full:23',
+                'from' => ['id' => 22222],
+                'message' => ['message_id' => 77, 'chat' => ['id' => '@gold_room']],
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/answerCallbackQuery')
+            && $request['text'] === 'معامله در حال انجام است.'
+            && $request['show_alert'] === true);
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/offers/23/accept'));
+    }
+
+    public function test_connected_non_vip_user_can_use_trading(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => false]),
+            'https://talaboard.test/api/telegram/trade-room/offers' => Http::response(['offers' => []]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => ['chat' => ['id' => 33333], 'from' => ['id' => 33333], 'text' => 'معاملات من'],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => $request->url() === 'https://talaboard.test/api/telegram/trade-room/offers');
+    }
+
+    public function test_user_can_set_trade_alias(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Cache::put('telegram-linked:44444', true, now()->addMinute());
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => ['chat' => ['id' => 44444], 'from' => ['id' => 44444], 'text' => 'نام مستعار'],
+        ])->assertNoContent();
+        $this->postJson('/api/telegram/webhook', [
+            'message' => ['chat' => ['id' => 44444], 'from' => ['id' => 44444], 'text' => 'بازرگان طلا'],
+        ])->assertNoContent();
+
+        $this->assertSame('بازرگان طلا', Cache::get('telegram-trade-alias:44444'));
     }
 }

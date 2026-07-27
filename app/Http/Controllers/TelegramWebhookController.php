@@ -23,8 +23,8 @@ class TelegramWebhookController extends Controller
             // sent as form data, nested keyboard arrays were not parsed as a
             // keyboard, so users only saw the "select ..." prompt.
             $response = Http::asJson()
-                ->connectTimeout(5)
-                ->timeout(15)
+                ->connectTimeout(2)
+                ->timeout(8)
                 ->withOptions(['force_ip_resolve' => 'v4'])
                 ->post("https://api.telegram.org/bot{$token}/{$method}", $data);
             $result = $response->json() ?? [];
@@ -54,9 +54,9 @@ class TelegramWebhookController extends Controller
         ]);
     }
 
-    private function sendInline($chat, string $text, array $keyboard): void
+    private function sendInline($chat, string $text, array $keyboard): array
     {
-        $this->api('sendMessage', ['chat_id' => $chat, 'text' => $text, 'reply_markup' => ['inline_keyboard' => $keyboard]]);
+        return $this->api('sendMessage', ['chat_id' => $chat, 'text' => $text, 'reply_markup' => ['inline_keyboard' => $keyboard]]);
     }
 
     private function user(array $chat): User
@@ -64,8 +64,26 @@ class TelegramWebhookController extends Controller
         if (! Schema::hasTable('telegram_connections')) {
             return new User(['telegram_chat_id' => (string) $chat['id']]);
         }
-        return User::query()->whereHas('telegramConnection', fn ($query) => $query->where('telegram_chat_id', (string) $chat['id']))->first()
+        return User::query()->with('telegramConnection')->whereHas('telegramConnection', fn ($query) => $query->where('telegram_chat_id', (string) $chat['id']))->first()
             ?? new User(['telegram_chat_id' => (string) $chat['id']]);
+    }
+
+    private function callbackUser(array $callback): User
+    {
+        $telegramUserId = (string) data_get($callback, 'from.id', '');
+        if ($telegramUserId === '') {
+            return $this->user((array) data_get($callback, 'message.chat', []));
+        }
+        if ($telegramUserId !== '' && Schema::hasTable('telegram_connections')) {
+            $connected = User::query()->with('telegramConnection')->whereHas('telegramConnection', fn ($query) => $query->where('telegram_user_id', $telegramUserId))->first();
+            if ($connected) {
+                return $connected;
+            }
+        }
+
+        $privateChatId = Cache::get('telegram-private-chat:'.$telegramUserId, $telegramUserId);
+
+        return new User(['telegram_chat_id' => (string) $privateChatId]);
     }
 
     private function membershipRequest(string $endpoint, array $payload): ?array
@@ -83,7 +101,7 @@ class TelegramWebhookController extends Controller
         }
 
         try {
-            $response = Http::acceptJson()->withToken($token)->timeout(8)->post("{$url}/{$endpoint}", $payload);
+            $response = Http::acceptJson()->withToken($token)->connectTimeout(2)->timeout(5)->post("{$url}/{$endpoint}", $payload);
 
             $responsePayload = $response->json();
             Log::channel(config('trading.log_channel', 'trading'))->log(
@@ -152,15 +170,22 @@ class TelegramWebhookController extends Controller
         }
     }
 
-    private function hasVipAccess(User $user): bool
+    private function hasConnectedAccess(User $user): bool
     {
-        if ($user->exists && $user->telegramConnection()->exists()) {
+        if ($user->exists && ($user->relationLoaded('telegramConnection') ? $user->telegramConnection !== null : $user->telegramConnection()->exists())) {
             return true;
         }
 
-        $membership = $this->siteRequest('member', $user);
+        $key = 'telegram-linked:'.$user->telegram_chat_id;
+        if (Cache::has($key)) {
+            return (bool) Cache::get($key);
+        }
 
-        return (bool) ($membership['linked'] ?? false) && (bool) ($membership['vip'] ?? false);
+        $membership = $this->siteRequest('member', $user);
+        $linked = (bool) ($membership['linked'] ?? false);
+        Cache::put($key, $linked, $linked ? now()->addDay() : now()->addSeconds(30));
+
+        return $linked;
     }
 
     private function linkWebsiteAccount(User $user, string $code): ?array
@@ -363,6 +388,64 @@ class TelegramWebhookController extends Controller
             .'وضعیت: '.($trade['status_label'] ?? 'فعال');
     }
 
+    private function channelOfferText(array $trade): string
+    {
+        $trade = $this->normalizeOffer($trade);
+        $side = ($trade['side'] ?? '') === 'buy' ? 'خرید' : 'فروش';
+
+        return "📣 {$side} ".($trade['asset_label'] ?? '—')."\n\n"
+            .'نام مستعار: '.($trade['alias'] ?? 'کاربر')."\n"
+            .'مقدار: '.$this->formatQuantity((float) $trade['quantity']).' '.($trade['unit_label'] ?? '')."\n"
+            .'قیمت واحد: '.number_format((float) $trade['unit_price'])." ریال\n"
+            .'مبلغ کل: '.number_format((float) $trade['total'])." ریال\n"
+            .'وضعیت: فعال';
+    }
+
+    private function channelForAsset(string $asset): int|string|null
+    {
+        $asset = $asset === 'silver_9999' ? 'silver_999' : $asset;
+        $channel = config("services.telegram.channels.{$asset}");
+
+        return filled($channel) ? $channel : null;
+    }
+
+    private function publishOfferToChannel(array $trade): bool
+    {
+        $trade = $this->normalizeOffer($trade);
+        $channel = $this->channelForAsset((string) ($trade['asset'] ?? $trade['item'] ?? ''));
+        if (! $channel || empty($trade['id'])) {
+            Log::channel(config('trading.log_channel', 'trading'))->warning('Trade offer channel is not configured.', [
+                'offer_id' => $trade['id'] ?? null,
+                'asset' => $trade['asset'] ?? null,
+            ]);
+            return false;
+        }
+
+        $result = $this->sendInline($channel, $this->channelOfferText($trade), $this->offerAcceptKeyboard($trade));
+        $messageId = data_get($result, 'result.message_id');
+        if (! $messageId) {
+            return false;
+        }
+
+        Cache::put('telegram-offer-message:'.$trade['id'], [
+            'channel_id' => $channel,
+            'message_id' => $messageId,
+            'offer' => $trade,
+        ], now()->addDays(30));
+
+        return true;
+    }
+
+    private function aliasKey(User $user): string
+    {
+        return 'telegram-trade-alias:'.$user->telegram_chat_id;
+    }
+
+    private function tradeAlias(User $user): string
+    {
+        return (string) Cache::get($this->aliasKey($user), 'کاربر');
+    }
+
     private function formatQuantity(float $quantity): string
     {
         return rtrim(rtrim(number_format($quantity, 3, '.', ''), '0'), '.');
@@ -562,45 +645,109 @@ class TelegramWebhookController extends Controller
         return true;
     }
 
-    private function acceptOffer(User $user, int|string $chatId, int $offerId, ?float $quantity, array $menu): void
+    private function acceptOffer(User $user, int|string $chatId, int $offerId, ?float $quantity, array $menu, ?string $token = null): bool
     {
-        if ($quantity !== null && $quantity <= 0) {
-            $this->send($chatId, 'مقدار معتبر را وارد کنید.', $menu);
-            return;
+        $processingKey = 'telegram-offer-processing:'.$offerId;
+        if ($token === null || ! hash_equals((string) Cache::get($processingKey), $token)) {
+            $this->send($chatId, 'زمان پذیرش این معامله تمام شده یا معامله توسط شخص دیگری در حال انجام است.', $menu);
+            return false;
         }
 
-        $payload = ['offer_id' => $offerId];
+        $message = Cache::get('telegram-offer-message:'.$offerId, []);
+        $original = (array) ($message['offer'] ?? []);
+        if ($quantity !== null && $original) {
+            $available = (float) ($original['quantity'] ?? 0);
+            $unit = (string) ($original['unit'] ?? 'gram');
+            $unit = $unit === 'piece' ? 'count' : $unit;
+            $remaining = round($available - $quantity, 3);
+            if ($quantity > $available || ! Trade::meetsMinimumQuantity($unit, $quantity) || ($remaining > 0 && ! Trade::meetsMinimumQuantity($unit, $remaining))) {
+                Cache::forget($processingKey);
+                $this->send($chatId, 'مقدار واردشده معتبر نیست؛ مقدار پذیرش و ماندهٔ معامله باید حداقل مجاز را داشته باشند.', $menu);
+                return false;
+            }
+        }
+        $payload = ['offer_id' => $offerId, 'acceptance_token' => $token];
         if ($quantity !== null) {
             $payload['quantity'] = $quantity;
         }
 
         $accepted = $this->siteRequest("trade-room/offers/{$offerId}/accept", $user, $payload);
-
         if ($accepted === null && ! $this->usesMembershipApi() && $user->exists) {
-            $trade = Trade::query()->whereKey($offerId)->whereIn('status', ['submitted', 'active'])->first();
-            if ($trade && ($quantity === null || $quantity <= (float) $trade->quantity) && Trade::meetsMinimumQuantity($trade->unit, $quantity ?? (float) $trade->quantity)) {
-                $accepted = DB::transaction(function () use ($trade, $user, $quantity) {
-                    $acceptQuantity = $quantity ?? (float) $trade->quantity;
-                    $trade->update([
-                        'quantity' => $acceptQuantity,
-                        'total_price' => (int) round($acceptQuantity * (float) $trade->unit_price),
-                        'status' => 'accepted',
-                        'accepted_by' => $user->id,
-                    ]);
+            $accepted = DB::transaction(function () use ($offerId, $user, $quantity) {
+                $trade = Trade::query()->whereKey($offerId)->lockForUpdate()->first();
+                if (! $trade || ! in_array($trade->status, ['submitted', 'active'], true)) {
+                    return null;
+                }
 
-                    return $trade->toArray();
-                });
-            }
+                $available = (float) $trade->quantity;
+                $acceptQuantity = $quantity ?? $available;
+                if ($acceptQuantity <= 0 || $acceptQuantity > $available || ! Trade::meetsMinimumQuantity($trade->unit, $acceptQuantity)) {
+                    return null;
+                }
+
+                $acceptedTrade = $trade->replicate(['idempotency_key']);
+                $acceptedTrade->quantity = $acceptQuantity;
+                $acceptedTrade->total_price = (int) round($acceptQuantity * (float) $trade->unit_price);
+                $acceptedTrade->status = 'accepted';
+                $acceptedTrade->accepted_by = $user->id;
+                $acceptedTrade->idempotency_key = null;
+
+                $remaining = round($available - $acceptQuantity, 3);
+                if ($remaining > 0) {
+                    if (! Trade::meetsMinimumQuantity($trade->unit, $remaining)) {
+                        return null;
+                    }
+                    $acceptedTrade->save();
+                    $trade->update(['quantity' => $remaining, 'total_price' => (int) round($remaining * (float) $trade->unit_price)]);
+                } else {
+                    $trade->update(['status' => 'accepted', 'accepted_by' => $user->id]);
+                    $acceptedTrade = $trade;
+                }
+
+                return ['accepted' => true, 'offer' => $trade->fresh()->toArray(), 'remaining_quantity' => $remaining, 'accepted_offer' => $acceptedTrade->toArray()];
+            });
         }
 
+        $success = is_array($accepted) && (($accepted['accepted'] ?? true) !== false);
         Log::channel(config('trading.log_channel', 'trading'))->info('Trade offer accept requested from Telegram.', [
             'telegram_chat_id' => $user->telegram_chat_id,
             'offer_id' => $offerId,
             'quantity' => $quantity,
-            'accepted' => $accepted !== null,
+            'accepted' => $success,
         ]);
 
-        $this->send($chatId, $accepted ? 'معامله در سایت ثبت شد.' : 'ثبت پذیرش معامله در سایت ناموفق بود؛ دوباره تلاش کنید.', $menu);
+        if (! $success) {
+            Cache::forget($processingKey);
+            $this->send($chatId, 'این معامله دیگر قابل پذیرش نیست یا ثبت آن در سایت ناموفق بود.', $menu);
+            return false;
+        }
+
+        if (! empty($message['channel_id']) && ! empty($message['message_id'])) {
+            $this->api('deleteMessage', ['chat_id' => $message['channel_id'], 'message_id' => $message['message_id']]);
+        }
+        Cache::forget('telegram-offer-message:'.$offerId);
+
+        if ($quantity !== null) {
+            $remainingOffer = (array) ($accepted['remaining_offer'] ?? $accepted['offer'] ?? $original);
+            $remaining = (float) ($accepted['remaining_quantity'] ?? $remainingOffer['remaining_quantity'] ?? max(0, (float) ($original['quantity'] ?? 0) - $quantity));
+            $remainingUnit = (string) ($remainingOffer['unit'] ?? $original['unit'] ?? 'gram');
+            if ($remaining > 0 && Trade::meetsMinimumQuantity($remainingUnit === 'piece' ? 'count' : $remainingUnit, $remaining)) {
+                $remainingOffer = [
+                    ...$original,
+                    ...$remainingOffer,
+                    'id' => $remainingOffer['id'] ?? $remainingOffer['offer_id'] ?? $offerId,
+                    'quantity' => $remaining,
+                    'total_price' => (int) round($remaining * (float) ($remainingOffer['unit_price'] ?? $original['unit_price'] ?? 0)),
+                    'status' => 'active',
+                ];
+                $this->publishOfferToChannel($remainingOffer);
+            }
+        }
+
+        Cache::forget($processingKey);
+        $this->send($chatId, 'معامله با موفقیت در سایت ثبت شد.', $menu);
+
+        return true;
     }
 
     private function handleTradeAcceptCallback(array $callback, User $user, array $menu): bool
@@ -620,15 +767,35 @@ class TelegramWebhookController extends Controller
             return true;
         }
 
-        $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
-
-        if ($mode === 'full') {
-            $this->acceptOffer($user, $chat['id'], $offerId, null, $menu);
+        if (! $this->hasConnectedAccess($user)) {
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'ابتدا حساب سایت را در گفت‌وگوی خصوصی ربات متصل کنید.', 'show_alert' => true]);
             return true;
         }
 
-        $this->saveFlow($user, ['type' => 'trade_accept', 'stage' => 'partial_quantity', 'offer_id' => $offerId]);
-        $this->send($chat['id'], 'مقدار موردنظر برای پذیرش جزئی را وارد کنید. حداقل ۱۰۰ گرم و حداکثر مقدار همین معامله قابل قبول است.', $menu);
+        $token = (string) str()->uuid();
+        if (! Cache::add('telegram-offer-processing:'.$offerId, $token, now()->addMinutes(5))) {
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'معامله در حال انجام است.', 'show_alert' => true]);
+            return true;
+        }
+
+        $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
+        $privateChatId = $user->telegram_chat_id ?: data_get($callback, 'from.id');
+
+        if ($mode === 'full') {
+            $this->acceptOffer($user, $privateChatId, $offerId, null, $menu, $token);
+            return true;
+        }
+
+        $this->saveFlow($user, [
+            'type' => 'trade_accept',
+            'stage' => 'partial_quantity',
+            'offer_id' => $offerId,
+            'acceptance_token' => $token,
+            'unit' => data_get(Cache::get('telegram-offer-message:'.$offerId), 'offer.unit', 'gram'),
+            'channel_id' => $chat['id'] ?? null,
+            'message_id' => data_get($callback, 'message.message_id'),
+        ]);
+        $this->send($privateChatId, 'مقدار موردنظر برای پذیرش جزئی را وارد کنید. حداقل مقدار مجاز و حداکثر مقدار همین معامله قابل قبول است.', $menu);
 
         return true;
     }
@@ -727,8 +894,8 @@ class TelegramWebhookController extends Controller
         $parts = explode(':', (string) ($callback['data'] ?? ''));
         $page = max(1, (int) ($parts[2] ?? 1));
 
-        if (! $user || ! $this->hasVipAccess($user)) {
-            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'ابتدا حساب ویژهٔ سایت را با /connect کد_اتصال متصل کنید.', 'show_alert' => true]);
+        if (! $user || ! $this->hasConnectedAccess($user)) {
+            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id'], 'text' => 'ابتدا حساب سایت را با /connect کد_اتصال متصل کنید.', 'show_alert' => true]);
             return;
         }
 
@@ -738,10 +905,6 @@ class TelegramWebhookController extends Controller
             return;
         } elseif ($parts[0] === 'trades' && ($parts[1] ?? '') === 'history') {
             $this->sendMyTradeRoomHistoryMessages($user, $chat['id'], $page);
-            $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
-            return;
-        } elseif ($parts[0] === 'trades' && in_array($parts[1] ?? '', ['buy', 'sell'], true)) {
-            $this->sendTradeListMessages($user, $chat['id'], $parts[1], $page);
             $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
             return;
         } elseif ($parts[0] === 'deposits' && in_array($parts[1] ?? '', ['pending', 'approved'], true) && $user?->is_admin) {
@@ -863,23 +1026,46 @@ class TelegramWebhookController extends Controller
         }
 
         try {
+            $alias = $this->tradeAlias($user);
             $siteTrade = $this->siteRequest('trade-room/offers/create', $user, [
                 'side' => $flow['side'],
                 'asset' => $this->siteAsset($flow['asset']),
                 'unit' => $this->siteUnit($flow['unit']),
                 'quantity' => $flow['quantity'],
                 'unit_price' => $flow['unit_price'],
+                'alias' => $alias,
             ]);
             if (! $siteTrade) {
                 throw new \RuntimeException('Website wallet or asset balance could not be verified.');
             }
+            $siteTrade = $siteTrade['offer'] ?? $siteTrade['trade'] ?? $siteTrade;
             $unitPrice = (int) ($siteTrade['unit_price'] ?? $siteTrade['price_per_unit'] ?? $flow['unit_price']);
             $trade = (object) [
                 'unit_price' => $unitPrice,
                 'total_price' => (int) ($siteTrade['total_price'] ?? $siteTrade['total'] ?? ((float) $flow['quantity'] * $unitPrice)),
             ];
+            $channelOffer = [
+                ...$siteTrade,
+                'id' => $siteTrade['id'] ?? $siteTrade['offer_id'] ?? null,
+                'side' => $flow['side'],
+                'asset' => $this->siteAsset($flow['asset']),
+                'unit' => $this->siteUnit($flow['unit']),
+                'quantity' => (float) $flow['quantity'],
+                'unit_price' => $unitPrice,
+                'total_price' => $trade->total_price,
+                'alias' => $alias,
+                'status' => 'active',
+            ];
+            $published = $this->publishOfferToChannel($channelOffer);
+            if (! $published) {
+                Log::channel(config('trading.log_channel', 'trading'))->warning('Trade was created but could not be published to its Telegram channel.', [
+                    'offer_id' => $channelOffer['id'],
+                    'asset' => $channelOffer['asset'],
+                ]);
+            }
             $this->clearFlow($user);
-            $this->send($chat['id'], 'معامله ثبت شد.'."\n".'قیمت واحد: '.number_format($trade->unit_price).' ریال' . "\n" . 'مبلغ کل: '.number_format($trade->total_price).' ریال', $menu);
+            $status = $published ? 'معامله ثبت و به کانال دارایی ارسال شد.' : 'معامله ثبت شد، اما ارسال به کانال انجام نشد؛ تنظیم کانال را بررسی کنید.';
+            $this->send($chat['id'], $status."\n".'قیمت واحد: '.number_format($trade->unit_price).' ریال' . "\n" . 'مبلغ کل: '.number_format($trade->total_price).' ریال', $menu);
         } catch (\Throwable $e) {
             $this->send($chat['id'], 'ثبت معامله انجام نشد: '.$e->getMessage(), $menu);
         }
@@ -989,10 +1175,10 @@ class TelegramWebhookController extends Controller
             try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'لیست معاملات'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
+        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
-            $user = $chat ? $this->user($chat) : null;
+            $user = $this->callbackUser($callback);
             $callbackData = (string) ($callback['data'] ?? '');
             if ($user && $callbackData === 'flow:deposit:paid') {
                 $this->saveFlow($user, ['type' => 'deposit', 'stage' => 'amount']);
@@ -1001,7 +1187,7 @@ class TelegramWebhookController extends Controller
                 $this->send($chat['id'], 'مبلغ واریزی را به ریال وارد کنید.', $menu);
                 return response()->noContent();
             }
-            if (str_starts_with($callbackData, 'trades:') || str_starts_with($callbackData, 'deposits:')) {
+            if (str_starts_with($callbackData, 'trades:mine:') || str_starts_with($callbackData, 'trades:history:') || str_starts_with($callbackData, 'deposits:')) {
                 $this->showCallbackList($callback);
                 return response()->noContent();
             }
@@ -1026,13 +1212,15 @@ class TelegramWebhookController extends Controller
                     $member = $this->connectWebsiteAccount($message, $matches[1]);
                     if (! $member || ! ($member['linked'] ?? false)) {
                         $this->send($chat['id'], 'کد اتصال نامعتبر است یا اعتبار آن تمام شده است.', $menu);
-                    } elseif (! ($member['vip'] ?? false)) {
-                        $this->send($chat['id'], 'حساب سایت شما متصل شد، اما عضویت ویژهٔ فعال ندارید.', $menu);
                     } else {
+                        Cache::forever('telegram-private-chat:'.data_get($message, 'from.id'), (string) $chat['id']);
+                        Cache::put('telegram-linked:'.$chat['id'], true, now()->addDay());
                         $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
                     }
                 } else {
                     $connections->connect($matches[1], (string) data_get($message, 'from.id'), (string) $chat['id'], data_get($message, 'from.username'));
+                    Cache::forever('telegram-private-chat:'.data_get($message, 'from.id'), (string) $chat['id']);
+                    Cache::put('telegram-linked:'.$chat['id'], true, now()->addDay());
                     $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
                 }
             } catch (\Illuminate\Validation\ValidationException $exception) {
@@ -1040,9 +1228,9 @@ class TelegramWebhookController extends Controller
             }
             return response()->noContent();
         }
-        if ($text === '/start') { $this->send($chat['id'], "به ربات اتاق معاملات طلای‌برد خوش آمدید.\n\nبرای استفاده، وارد حساب ویژه خود در سایت شوید و از بخش پروفایل یک کد اتصال بسازید. سپس حداکثر تا ۱۰ دقیقه، آن را با قالب زیر برای ربات ارسال کنید:\n\n/connect CODE", $menu); return response()->noContent(); }
+        if ($text === '/start') { $this->send($chat['id'], "به ربات اتاق معاملات طلای‌برد خوش آمدید.\n\nبرای استفاده، وارد حساب خود در سایت شوید و از بخش پروفایل یک کد اتصال بسازید. سپس حداکثر تا ۱۰ دقیقه، آن را با قالب زیر برای ربات ارسال کنید:\n\n/connect CODE", $menu); return response()->noContent(); }
         if (str_starts_with($text, '/connect')) { $this->send($chat['id'], "فرمت صحیح: /connect CODE\n\nCODE باید کد ۶ رقمی ساخته‌شده در پروفایل سایت باشد و تا ۱۰ دقیقه اعتبار دارد.", $menu); return response()->noContent(); }
-        if (! $this->hasVipAccess($user)) { $this->send($chat['id'], "دسترسی ربات فقط برای اعضای ویژه فعال است.\n\nوارد سایت شوید، از پروفایل کد اتصال بسازید و آن را حداکثر تا ۱۰ دقیقه با دستور /connect CODE ارسال کنید.", $menu); return response()->noContent(); }
+        if (! $this->hasConnectedAccess($user)) { $this->send($chat['id'], "ابتدا حساب سایت خود را متصل کنید.\n\nوارد سایت شوید، از پروفایل کد اتصال بسازید و آن را حداکثر تا ۱۰ دقیقه با دستور /connect CODE ارسال کنید.", $menu); return response()->noContent(); }
         $flow = $this->flow($user);
         if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
         if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {
@@ -1060,6 +1248,11 @@ class TelegramWebhookController extends Controller
         }
         if ($text === 'سوابق من') {
             $this->sendMyTradeRoomHistoryMessages($user, $chat['id'], 1, $menu);
+            return response()->noContent();
+        }
+        if ($text === 'نام مستعار') {
+            $this->saveFlow($user, ['type' => 'alias', 'stage' => 'value']);
+            $this->send($chat['id'], 'نام مستعار دلخواه را وارد کنید. این نام روی معاملات ارسالی به کانال نمایش داده می‌شود.', $menu);
             return response()->noContent();
         }
         if ($photo && ($flow['type'] ?? '') === 'deposit' && ($flow['stage'] ?? '') === 'receipt') {
@@ -1107,11 +1300,23 @@ class TelegramWebhookController extends Controller
         }
         if (($flow['type'] ?? '') === 'trade_accept' && ($flow['stage'] ?? '') === 'partial_quantity') {
             $quantity = is_numeric($text) ? (float) $text : 0;
-            if (! Trade::meetsMinimumQuantity('gram', $quantity)) {
-                $this->send($chat['id'], 'برای پذیرش جزئی، مقدار معتبر و حداقل ۱۰۰ گرم وارد کنید.', $menu);
+            $unit = (string) ($flow['unit'] ?? 'gram');
+            if (! Trade::meetsMinimumQuantity($unit === 'piece' ? 'count' : $unit, $quantity)) {
+                $this->send($chat['id'], 'برای پذیرش جزئی، مقدار معتبر و حداقل مجاز معامله را وارد کنید.', $menu);
             } else {
                 $this->clearFlow($user);
-                $this->acceptOffer($user, $chat['id'], (int) ($flow['offer_id'] ?? 0), $quantity, $menu);
+                $this->acceptOffer($user, $chat['id'], (int) ($flow['offer_id'] ?? 0), $quantity, $menu, (string) ($flow['acceptance_token'] ?? ''));
+            }
+            return response()->noContent();
+        }
+        if (($flow['type'] ?? '') === 'alias' && ($flow['stage'] ?? '') === 'value') {
+            $alias = trim($text);
+            if (mb_strlen($alias) < 2 || mb_strlen($alias) > 30) {
+                $this->send($chat['id'], 'نام مستعار باید بین ۲ تا ۳۰ نویسه باشد.', $menu);
+            } else {
+                Cache::forever($this->aliasKey($user), $alias);
+                $this->clearFlow($user);
+                $this->send($chat['id'], "نام مستعار شما روی «{$alias}» تنظیم شد.", $menu);
             }
             return response()->noContent();
         }
@@ -1123,7 +1328,6 @@ class TelegramWebhookController extends Controller
         if (str_starts_with($text, '/inventory ')) { [, $item, $quantity] = array_pad(explode(' ', $text), 3, null); $result = $this->siteRequest('inventory-increase', $user, ['item' => $item, 'quantity' => $quantity]); $this->send($chat['id'], $result ? "درخواست {$result['label']} در سایت ثبت شد و در انتظار تأیید ادمین است." : 'ثبت درخواست در سایت ناموفق بود؛ نوع و مقدار را بررسی کنید.', $menu); return response()->noContent(); }
         if (str_starts_with($text, '/deposit ')) { $amount = (int) trim(substr($text, 9)); $deposit = $this->siteRequest('deposits', $user, ['amount' => $amount]); if ($deposit) { Cache::put('site-deposit:'.$user->telegram_chat_id, $deposit['id'], now()->addHour()); $this->send($chat['id'], 'درخواست شارژ در سایت ثبت شد؛ اکنون تصویر فیش را ارسال کنید.', $menu); } else { $this->send($chat['id'], 'ثبت درخواست در سایت ناموفق بود؛ مبلغ را بررسی کنید.', $menu); } return response()->noContent(); }
         if ($photo) { $depositId = Cache::pull('site-deposit:'.$user->telegram_chat_id); $ok = $depositId && $this->uploadReceiptToSite($user, $depositId, end($photo)); $this->send($chat['id'], $ok ? 'فیش در سایت ذخیره شد و درخواست در انتظار تأیید ادمین است.' : 'ابتدا مبلغ را با /deposit وارد کنید یا دوباره تصویر فیش را ارسال کنید.', $menu); return response()->noContent(); }
-        if ($text === 'لیست معاملات') { $this->sendInline($chat['id'], 'نوع فهرست را انتخاب کنید:', [[['text' => 'لیست خرید', 'callback_data' => 'trades:buy:1'], ['text' => 'لیست فروش', 'callback_data' => 'trades:sell:1']]]); return response()->noContent(); }
         if ($text === 'فیش‌های در انتظار تأیید' || $text === 'فیش‌های تأییدشده') { $this->send($chat['id'], 'فیش‌ها و تأیید آن‌ها فقط در پنل مدیریت سایت قابل مشاهده و بررسی هستند.', $menu); return response()->noContent(); }
         if ($text === 'ثبت معامله') { $this->saveFlow($user, ['type'=>'trade','stage'=>'asset']); $this->sendInline($chat['id'], 'دارایی معامله را انتخاب کنید:', $this->assetKeyboard('flow:trade:asset')); return response()->noContent(); }
         if (str_starts_with($text, '/trade ')) { [, $side, $unit, $qty] = array_pad(explode(' ', $text), 4, null); $trade = $this->siteRequest('trades', $user, ['side' => $side, 'unit' => $unit, 'quantity' => $qty]); $this->send($chat['id'], $trade ? "معامله در سایت ثبت شد. قیمت واحد: ".number_format($trade['price_per_unit']).'، مبلغ کل: '.number_format($trade['total']) : 'ثبت معامله در سایت ناموفق بود؛ موجودی و مقدار را بررسی کنید.', $menu); return response()->noContent(); }
