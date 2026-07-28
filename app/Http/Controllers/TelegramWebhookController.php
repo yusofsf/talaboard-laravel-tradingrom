@@ -593,6 +593,19 @@ class TelegramWebhookController extends Controller
         return [$buttons];
     }
 
+    private function offerIsExpired(array $offer): bool
+    {
+        $expiresAt = $offer['expires_at'] ?? null;
+        if ($expiresAt) {
+            return \Illuminate\Support\Carbon::parse($expiresAt)->isPast();
+        }
+
+        $createdAt = $offer['created_at'] ?? $offer['traded_at'] ?? null;
+        return $createdAt
+            ? \Illuminate\Support\Carbon::parse($createdAt)->addMinutes(2)->isPast()
+            : false;
+    }
+
     private function sendTradeListMessages(User $user, int|string $chatId, string $side, int $page, array $menu = []): void
     {
         [$title, $rows, $pagination, $page] = $this->tradeList($user, $side, $page);
@@ -995,6 +1008,19 @@ class TelegramWebhookController extends Controller
             'message_id' => data_get($callback, 'message.message_id', data_get($offerMessage, 'message_id')),
         ];
         Cache::put('telegram-offer-message:'.$offerId, $offerMessage, now()->addMinutes(10));
+        if ($this->offerIsExpired((array) ($offerMessage['offer'] ?? []))) {
+            Cache::forget('telegram-offer-processing:'.$offerId);
+            $this->api('answerCallbackQuery', [
+                'callback_query_id' => $callback['id'],
+                'text' => 'زمان معامله منقضی شده است و امکان پذیرش جزئی یا کامل وجود ندارد.',
+                'show_alert' => true,
+            ]);
+            if ($messageId = data_get($callback, 'message.message_id')) {
+                $this->api('deleteMessage', ['chat_id' => $chat['id'] ?? null, 'message_id' => $messageId]);
+            }
+            $this->send($user->telegram_chat_id ?: data_get($callback, 'from.id'), 'زمان این معامله منقضی شده است؛ پذیرش جزئی یا کامل دیگر امکان‌پذیر نیست.', $menu);
+            return true;
+        }
         $ownerChatId = (string) data_get($offerMessage, 'offer.owner_telegram_chat_id', '');
         if ($ownerChatId !== '' && hash_equals($ownerChatId, (string) $user->telegram_chat_id)) {
             $this->api('answerCallbackQuery', [
@@ -1284,6 +1310,7 @@ class TelegramWebhookController extends Controller
                 'quantity' => $flow['quantity'],
                 'unit_price' => $flow['unit_price'],
                 'allow_partial' => (bool) ($flow['allow_partial'] ?? true),
+                'expires_at' => now()->addMinutes(2)->toIso8601String(),
                 'alias' => $alias,
             ]);
             if (! $siteTrade) {
@@ -1306,6 +1333,7 @@ class TelegramWebhookController extends Controller
                 'total_price' => $trade->total_price,
                 'alias' => $alias,
                 'owner_telegram_chat_id' => (string) $user->telegram_chat_id,
+                'expires_at' => now()->addMinutes(2)->toIso8601String(),
                 'status' => 'active',
                 'allow_partial' => (bool) ($siteTrade['allow_partial'] ?? $flow['allow_partial'] ?? true),
             ];
