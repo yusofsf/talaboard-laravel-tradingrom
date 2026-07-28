@@ -46,7 +46,7 @@ class TradeService
                 if ($balance->quantity < $data['quantity']) throw ValidationException::withMessages(['assets' => 'موجودی دارایی کافی نیست.']);
                 $balance->decrement('quantity', $data['quantity']);
             }
-            $trade = Trade::create(['user_id' => $user->id, 'side' => $data['side'], 'asset' => $data['asset'], 'unit' => $data['unit'], 'quantity' => $data['quantity'], 'unit_price' => $unitPrice, 'total_price' => $total, 'price_symbol' => $symbol, 'status' => 'submitted', 'idempotency_key' => $data['idempotency_key'] ?? null, 'traded_at' => now(config('trading.timezone')), 'expires_at' => $this->expiry->forNow()]);
+            $trade = Trade::create(['user_id' => $user->id, 'side' => $data['side'], 'asset' => $data['asset'], 'unit' => $data['unit'], 'quantity' => $data['quantity'], 'unit_price' => $unitPrice, 'total_price' => $total, 'price_symbol' => $symbol, 'status' => 'submitted', 'allow_partial' => $data['allow_partial'] ?? true, 'idempotency_key' => $data['idempotency_key'] ?? null, 'traded_at' => now(config('trading.timezone')), 'expires_at' => $this->expiry->forNow()]);
             if ($data['side'] === 'sell') WalletTransaction::create(['user_id' => $user->id, 'amount' => -$total, 'type' => 'trade_reserve', 'reference_type' => Trade::class, 'reference_id' => $trade->id, 'description' => 'رزرو وجه معامله']);
             return $trade;
         });

@@ -586,10 +586,11 @@ class TelegramWebhookController extends Controller
             return [];
         }
 
-        return [[
-            ['text' => 'پذیرفتن کل', 'callback_data' => 'trade_accept:full:'.$trade['id']],
-            ['text' => 'پذیرفتن جز', 'callback_data' => 'trade_accept:partial:'.$trade['id']],
-        ]];
+        $buttons = [['text' => 'پذیرفتن کل', 'callback_data' => 'trade_accept:full:'.$trade['id']]];
+        if (($trade['allow_partial'] ?? true) !== false) {
+            $buttons[] = ['text' => 'پذیرفتن جز', 'callback_data' => 'trade_accept:partial:'.$trade['id']];
+        }
+        return [$buttons];
     }
 
     private function sendTradeListMessages(User $user, int|string $chatId, string $side, int $page, array $menu = []): void
@@ -670,6 +671,7 @@ class TelegramWebhookController extends Controller
                     'unit_price' => $trade->unit_price,
                     'total_price' => $trade->total_price,
                     'status' => $trade->status,
+                    'allow_partial' => $trade->allow_partial,
                     'traded_at' => $trade->traded_at?->toIso8601String(),
                 ]));
         }
@@ -829,6 +831,11 @@ class TelegramWebhookController extends Controller
 
         $message = Cache::get('telegram-offer-message:'.$offerId, []);
         $original = (array) ($message['offer'] ?? []);
+        if ($quantity !== null && $original && (($original['allow_partial'] ?? true) === false)) {
+            Cache::forget($processingKey);
+            $this->send($chatId, 'این معامله فقط به‌صورت کامل قابل پذیرش است.', $menu);
+            return false;
+        }
         if ($quantity !== null && $original) {
             $available = (float) ($original['quantity'] ?? 0);
             $unit = (string) ($original['unit'] ?? 'gram');
@@ -850,7 +857,7 @@ class TelegramWebhookController extends Controller
         if ($accepted === null && ! $this->usesMembershipApi() && $user->exists) {
             $accepted = DB::transaction(function () use ($offerId, $user, $quantity) {
                 $trade = Trade::query()->whereKey($offerId)->lockForUpdate()->first();
-                if (! $trade || ! in_array($trade->status, ['submitted', 'active'], true) || ($user->exists && (int) $trade->user_id === (int) $user->id)) {
+                if (! $trade || ! in_array($trade->status, ['submitted', 'active'], true) || ($quantity !== null && ! $trade->allow_partial) || ($user->exists && (int) $trade->user_id === (int) $user->id)) {
                     return null;
                 }
 
@@ -1276,6 +1283,7 @@ class TelegramWebhookController extends Controller
                 'unit' => $this->siteUnit($flow['unit']),
                 'quantity' => $flow['quantity'],
                 'unit_price' => $flow['unit_price'],
+                'allow_partial' => (bool) ($flow['allow_partial'] ?? true),
                 'alias' => $alias,
             ]);
             if (! $siteTrade) {
@@ -1299,6 +1307,7 @@ class TelegramWebhookController extends Controller
                 'alias' => $alias,
                 'owner_telegram_chat_id' => (string) $user->telegram_chat_id,
                 'status' => 'active',
+                'allow_partial' => (bool) ($siteTrade['allow_partial'] ?? $flow['allow_partial'] ?? true),
             ];
             $published = $this->publishOfferToChannel($channelOffer);
             if (! $published) {
@@ -1352,7 +1361,8 @@ class TelegramWebhookController extends Controller
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'asset') { $this->saveFlow($user, ['type' => 'trade', 'stage' => 'side', 'asset' => $parts[3]]); $this->sendInline($chat['id'], 'نوع معامله را انتخاب کنید:', [[['text' => 'فروش', 'callback_data' => 'flow:trade:side:buy'], ['text' => 'خرید', 'callback_data' => 'flow:trade:side:sell']]]); return true; }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'side' && ($flow['type'] ?? '') === 'trade') { $flow['side'] = $parts[3]; $flow['stage'] = 'unit'; $this->saveFlow($user, $flow); if ($this->isCoin($flow['asset'])) { $flow['unit'] = 'count'; $flow['stage'] = 'quantity'; $this->saveFlow($user, $flow); $this->send($chat['id'], 'تعداد سکه را وارد کنید.', $menu); } else $this->sendInline($chat['id'], 'واحد را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:trade:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:trade:unit:mesghal']]]); return true; }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'unit' && ($flow['type'] ?? '') === 'trade') { $flow['unit'] = $parts[3]; $flow['stage'] = 'quantity'; $this->saveFlow($user, $flow); $this->send($chat['id'], 'مقدار را وارد کنید.', $menu); return true; }
-        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'price' && ($flow['type'] ?? '') === 'trade') { if (($parts[3] ?? '') === 'default') $this->completeTelegramTrade($user, $flow, $chat, $menu); else { $flow['stage'] = 'custom_price'; $this->saveFlow($user, $flow); $this->send($chat['id'], 'قیمت واحد دلخواه را به تومان وارد کنید.', $menu); } return true; }
+        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'price' && ($flow['type'] ?? '') === 'trade') { if (($parts[3] ?? '') === 'default') { $flow['stage'] = 'partial_mode'; $this->saveFlow($user, $flow); $this->sendInline($chat['id'], 'آیا پذیرش بخشی از این معامله مجاز باشد؟', [[['text' => 'بله، جزئی یا کامل', 'callback_data' => 'flow:trade:partial:yes'], ['text' => 'خیر، فقط کامل', 'callback_data' => 'flow:trade:partial:no']]]); } else { $flow['stage'] = 'custom_price'; $this->saveFlow($user, $flow); $this->send($chat['id'], 'قیمت واحد دلخواه را به تومان وارد کنید.', $menu); } return true; }
+        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'partial' && ($flow['type'] ?? '') === 'trade') { $flow['allow_partial'] = ($parts[3] ?? '') === 'yes'; $this->completeTelegramTrade($user, $flow, $chat, $menu); return true; }
         if (($parts[1] ?? '') === 'delivery' && ($parts[2] ?? '') === 'asset') { $flow = ['type' => 'delivery', 'stage' => 'unit', 'asset' => $parts[3]]; if ($this->isCoin($flow['asset'])) { $flow['unit'] = 'count'; $flow['stage'] = 'quantity'; $this->saveFlow($user, $flow); $this->send($chat['id'], 'تعداد سکه تحویل‌داده‌شده را وارد کنید.', $menu); } else { $this->saveFlow($user, $flow); $this->sendInline($chat['id'], 'واحد را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]); } return true; }
         if (($parts[1] ?? '') === 'delivery' && ($parts[2] ?? '') === 'unit' && ($flow['type'] ?? '') === 'delivery') { $flow['unit'] = $parts[3]; $flow['stage'] = 'quantity'; $this->saveFlow($user, $flow); $this->send($chat['id'], 'مقدار تحویل‌داده‌شده را وارد کنید.', $menu); return true; }
         return true;
@@ -1671,7 +1681,7 @@ class TelegramWebhookController extends Controller
             return response()->noContent();
         }
         if (($flow['type'] ?? '') === 'trade' && ($flow['stage'] ?? '') === 'quantity') { if (!is_numeric($text) || (float)$text <= 0) { $this->send($chat['id'], 'مقدار معتبر را وارد کنید.', $menu); } else { $flow['quantity']=$text; $symbol=$this->isCoin($flow['asset'])?$flow['asset']:($flow['asset']==='gold' ? 'gold_'.$flow['unit'] : $flow['asset'].'_'.$flow['unit']); $snapshot=$prices->prices()->get($symbol); if ($snapshot) { $flow['unit_price']=$snapshot->price; $flow['stage']='price'; $this->saveFlow($user,$flow); $this->sendInline($chat['id'], 'قیمت پیش‌فرض سایت: '.$this->formatToman($snapshot->price).' تومان. انتخاب کنید:', [[['text'=>'تأیید قیمت سایت','callback_data'=>'flow:trade:price:default'],['text'=>'ورود قیمت دیگر','callback_data'=>'flow:trade:price:custom']]]); } else { $flow['stage']='custom_price'; $this->saveFlow($user,$flow); $this->send($chat['id'], 'قیمت سایت در دسترس نیست؛ قیمت واحد را به تومان وارد کنید.', $menu); } } return response()->noContent(); }
-        if (($flow['type'] ?? '') === 'trade' && ($flow['stage'] ?? '') === 'custom_price') { if (!is_numeric($text) || (int)$text < 1) $this->send($chat['id'], 'قیمت واحد معتبر را وارد کنید.', $menu); else { $flow['unit_price']=(int)$text * 10; $this->completeTelegramTrade($user,$flow,$chat,$menu); } return response()->noContent(); }
+        if (($flow['type'] ?? '') === 'trade' && ($flow['stage'] ?? '') === 'custom_price') { if (!is_numeric($text) || (int)$text < 1) $this->send($chat['id'], 'قیمت واحد معتبر را وارد کنید.', $menu); else { $flow['unit_price']=(int)$text * 10; $flow['stage']='partial_mode'; $this->saveFlow($user,$flow); $this->sendInline($chat['id'], 'آیا پذیرش بخشی از این معامله مجاز باشد؟', [[['text'=>'بله، جزئی یا کامل','callback_data'=>'flow:trade:partial:yes'],['text'=>'خیر، فقط کامل','callback_data'=>'flow:trade:partial:no']]]); } return response()->noContent(); }
         if ($text === 'قیمت لحظه‌ای') { $labels=TalaboardClient::PRODUCTS; $rows=$prices->prices(); $out="💹 قیمت‌های لحظه‌ای (تومان)\n\n"; foreach($labels as $symbol=>$label) $out .= ($symbol==='full_coin'||$symbol==='half_coin'||$symbol==='quarter_coin'?'🪙 ':'⚖️ ').$label.': '.($rows->get($symbol)?$this->formatToman($rows->get($symbol)->price):'—')."\n"; $this->send($chat['id'], $out, $menu); return response()->noContent(); }
         if ($text === 'واریز وجه' || $text === 'شارژ کیف پول') { $this->sendInline($chat['id'], "شماره حساب: ".config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینه زیر را بزنید.", [[['text'=>'واریز کردم','callback_data'=>'flow:deposit:paid']]]); return response()->noContent(); }
         if ($text === 'افزایش موجودی' || $text === 'درخواست افزایش موجودی') { $this->sendInline($chat['id'], 'برای افزایش موجودی، ابتدا دارایی را به فروشگاه تحویل دهید. پس از تحویل، گزینه زیر را بزنید.', [[['text'=>'تحویل دادم','callback_data'=>'flow:delivery:start']]]); return response()->noContent(); }

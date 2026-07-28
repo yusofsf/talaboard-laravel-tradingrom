@@ -317,6 +317,15 @@ class TelegramCallbackTest extends TestCase
             ],
         ])->assertNoContent();
 
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'partial-mode-callback',
+                'data' => 'flow:trade:partial:yes',
+                'from' => ['id' => 12345],
+                'message' => ['message_id' => 56, 'chat' => ['id' => 12345]],
+            ],
+        ])->assertNoContent();
+
         Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
             && $request['chat_id'] === '@gold_room'
             && str_contains((string) $request['text'], 'نام مستعار: کاربر')
@@ -534,6 +543,15 @@ class TelegramCallbackTest extends TestCase
 
         $this->postJson('/api/telegram/webhook', [
             'message' => ['chat' => ['id' => 55555], 'from' => ['id' => 55555], 'text' => '123456'],
+        ])->assertNoContent();
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'partial-mode-callback',
+                'data' => 'flow:trade:partial:yes',
+                'from' => ['id' => 55555],
+                'message' => ['message_id' => 56, 'chat' => ['id' => 55555]],
+            ],
         ])->assertNoContent();
 
         Http::assertSent(fn ($request) => $request->url() === 'https://talaboard.test/api/telegram/trade-room/offers/create'
