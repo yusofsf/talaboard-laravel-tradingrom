@@ -163,7 +163,9 @@ class TelegramWebhookController extends Controller
                 return null;
             }
 
-            return is_array($responsePayload) ? $responsePayload : null;
+            // Successful write endpoints may legitimately return 204 No Content.
+            // Keep that distinct from a failed request, which is represented by null.
+            return is_array($responsePayload) ? $responsePayload : [];
         } catch (\Throwable $exception) {
             Log::channel(config('trading.log_channel', 'trading'))->error('Membership API request failed.', [
                 'endpoint' => $endpoint,
@@ -791,23 +793,27 @@ class TelegramWebhookController extends Controller
             }
         }
 
+        $wasDeleted = $deleted !== null
+            && (bool) ($deleted['deleted'] ?? $deleted['cancelled'] ?? $deleted['success'] ?? true);
+
         Log::channel(config('trading.log_channel', 'trading'))->info('Personal trade-room offer deletion requested from Telegram.', [
             'telegram_chat_id' => $user->telegram_chat_id,
             'offer_id' => $offerId,
-            'deleted' => $deleted !== null,
+            'deleted' => $wasDeleted,
         ]);
 
         $this->api('answerCallbackQuery', [
             'callback_query_id' => $callback['id'],
-            'text' => $deleted ? 'معامله حذف شد.' : 'حذف معامله ناموفق بود.',
-            'show_alert' => $deleted === null,
+            'text' => $wasDeleted ? 'معامله حذف شد.' : ($this->lastSiteError ?: 'حذف معامله ناموفق بود.'),
+            'show_alert' => ! $wasDeleted,
         ]);
 
-        if ($deleted) {
+        if ($wasDeleted) {
             $messageId = data_get($callback, 'message.message_id');
             $messageId
                 ? $this->api('deleteMessage', ['chat_id' => $chatId, 'message_id' => $messageId])
-                : $this->send($chatId, 'معامله از اتاق معاملاتی حذف شد.', $menu);
+                : null;
+            $this->send($chatId, 'معامله شما با موفقیت حذف شد.', $menu);
         }
 
         return true;
@@ -902,11 +908,15 @@ class TelegramWebhookController extends Controller
         }
         Cache::forget('telegram-offer-message:'.$offerId);
 
+        $resultMessage = 'کل معامله با موفقیت انجام شد.';
         if ($quantity !== null) {
             $remainingOffer = (array) ($accepted['remaining_offer'] ?? $accepted['offer'] ?? $original);
             $remaining = (float) ($accepted['remaining_quantity'] ?? $remainingOffer['remaining_quantity'] ?? max(0, (float) ($original['quantity'] ?? 0) - $quantity));
             $remainingUnit = (string) ($remainingOffer['unit'] ?? $original['unit'] ?? 'gram');
             $remainingAsset = (string) ($remainingOffer['asset'] ?? $original['asset'] ?? '');
+            $unitLabel = ['gram' => 'گرم', 'mesghal' => 'مثقال', 'piece' => 'عدد', 'count' => 'عدد'];
+            $acceptedUnit = $unitLabel[$original['unit'] ?? ''] ?? ($original['unit'] ?? '');
+            $remainingUnitLabel = $unitLabel[$remainingOffer['unit'] ?? $original['unit'] ?? ''] ?? ($remainingOffer['unit'] ?? $original['unit'] ?? '');
             if ($remaining > 0 && Trade::meetsMinimumQuantity($remainingUnit === 'piece' ? 'count' : $remainingUnit, $remaining, $remainingAsset)) {
                 $remainingOffer = [
                     ...$original,
@@ -917,11 +927,17 @@ class TelegramWebhookController extends Controller
                     'status' => 'active',
                 ];
                 $this->publishOfferToChannel($remainingOffer);
+                $resultMessage = 'بخشی از معامله با موفقیت انجام شد.'
+                    ."\nمقدار انجام‌شده: {$this->formatQuantity($quantity)} {$acceptedUnit}"
+                    ."\nمانده معامله: {$this->formatQuantity($remaining)} {$remainingUnitLabel}";
+            } else {
+                $resultMessage = 'بخشی از معامله با موفقیت انجام شد و معامله به‌طور کامل به پایان رسید.'
+                    ."\nمقدار انجام‌شده: {$this->formatQuantity($quantity)} {$acceptedUnit}";
             }
         }
 
         Cache::forget($processingKey);
-        $this->send($chatId, 'معامله با موفقیت در سایت ثبت شد.', $menu);
+        $this->send($chatId, $resultMessage, $menu);
 
         return true;
     }

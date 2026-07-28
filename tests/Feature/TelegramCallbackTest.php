@@ -189,6 +189,59 @@ class TelegramCallbackTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/deleteMessage')
             && $request['chat_id'] === 12345
             && $request['message_id'] === 77);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['chat_id'] === 12345
+            && str_contains((string) $request['text'], 'با موفقیت حذف شد'));
+    }
+
+    public function test_deleting_my_trade_room_offer_accepts_a_successful_empty_response(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/trade-room/offers/15/cancel' => Http::response(null, 204),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'callback-id',
+                'data' => 'trade_delete:15',
+                'message' => ['message_id' => 77, 'chat' => ['id' => 12345]],
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/deleteMessage')
+            && $request['chat_id'] === 12345
+            && $request['message_id'] === 77);
+    }
+
+    public function test_deleting_my_trade_room_offer_keeps_the_message_when_site_rejects_deletion(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/trade-room/offers/15/cancel' => Http::response(['deleted' => false]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'callback-id',
+                'data' => 'trade_delete:15',
+                'message' => ['message_id' => 77, 'chat' => ['id' => 12345]],
+            ],
+        ])->assertNoContent();
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/deleteMessage'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/answerCallbackQuery')
+            && $request['show_alert'] === true);
     }
 
     public function test_my_history_shows_accepted_trade_room_offers_as_separate_messages(): void
@@ -360,6 +413,10 @@ class TelegramCallbackTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
             && $request['chat_id'] === '@gold_room'
             && str_contains((string) $request['text'], 'مقدار: 150 گرم'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && (string) $request['chat_id'] === '12345'
+            && str_contains((string) $request['text'], 'بخشی از معامله با موفقیت انجام شد')
+            && str_contains((string) $request['text'], 'مانده معامله: 150 گرم'));
     }
 
     public function test_second_acceptor_is_told_the_offer_is_in_progress(): void
