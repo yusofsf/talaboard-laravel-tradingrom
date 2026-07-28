@@ -22,8 +22,10 @@ return [
         ],
     ],
     'membership' => [
-        'url' => env('MEMBERSHIP_API_URL'),
-        'token' => env('MEMBERSHIP_API_TOKEN'),
-        'web_url' => env('MEMBERSHIP_WEB_URL'),
+        // The website membership endpoints live on the same API by default.
+        // Dedicated values can still override these when the services are split.
+        'url' => env('MEMBERSHIP_API_URL', rtrim((string) env('TALABOARD_API_URL'), '/').'/api/telegram'),
+        'token' => env('MEMBERSHIP_API_TOKEN', env('TALABOARD_API_TOKEN')),
+        'web_url' => env('MEMBERSHIP_WEB_URL', rtrim((string) env('TALABOARD_API_URL'), '/').'/membership'),
     ],
 ];

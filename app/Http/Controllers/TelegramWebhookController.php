@@ -167,6 +167,7 @@ class TelegramWebhookController extends Controller
             // Keep that distinct from a failed request, which is represented by null.
             return is_array($responsePayload) ? $responsePayload : [];
         } catch (\Throwable $exception) {
+            $this->lastSiteError = 'ارتباط با سایت برقرار نشد؛ لطفاً چند لحظه دیگر دوباره تلاش کنید.';
             Log::channel(config('trading.log_channel', 'trading'))->error('Membership API request failed.', [
                 'endpoint' => $endpoint,
                 'exception' => $exception::class,
@@ -1544,11 +1545,12 @@ class TelegramWebhookController extends Controller
                 if ($this->usesMembershipApi()) {
                     $member = $this->connectWebsiteAccount($message, $matches[1]);
                     if (! $member || ! ($member['linked'] ?? false)) {
-                        $this->send($chat['id'], 'کد اتصال نامعتبر است یا اعتبار آن تمام شده است.', $menu);
+                        $this->send($chat['id'], $this->lastSiteError ?: 'کد اتصال نامعتبر است یا اعتبار آن تمام شده است.', $menu);
                     } else {
                         Cache::forever('telegram-private-chat:'.data_get($message, 'from.id'), (string) $chat['id']);
                         Cache::put('telegram-linked:'.$chat['id'], true, now()->addDay());
                         Cache::put('telegram-membership:'.$chat['id'], $member, now()->addDay());
+                        $menu = $this->menuForMembership($user, $menu);
                         $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
                     }
                 } else {
@@ -1566,7 +1568,7 @@ class TelegramWebhookController extends Controller
         if ($text === '/start') {
             $welcome = 'به ربات معاملات برخط طلا و نقره خوش آمدید.';
             if (! $this->hasConnectedAccess($user)) {
-                $welcome .= "\n\nبرای اتصال، از پروفایل سایت کد اتصال بسازید و با دستور زیر ارسال کنید:\n\n/connect CODE";
+                $welcome .= "\n\nلطفاً کد کانکت را وارد کنید:\n\n/connect CODE";
             }
             $this->send($chat['id'], $welcome, $menu);
             return response()->noContent();
@@ -1587,7 +1589,7 @@ class TelegramWebhookController extends Controller
         }
         if (! $this->hasConnectedAccess($user)) {
             $this->audit('access.denied', ['reason' => 'not_linked', 'chat_id' => $chat['id'] ?? null, 'text' => $text], 'notice');
-            $this->send($chat['id'], "ابتدا حساب سایت خود را متصل کنید.\n\nوارد سایت شوید، از پروفایل کد اتصال بسازید و آن را حداکثر تا ۱۰ دقیقه با دستور /connect CODE ارسال کنید.", $menu);
+            $this->send($chat['id'], "لطفاً کد کانکت را وارد کنید:\n\n/connect CODE", $menu);
             return response()->noContent();
         }
         if (! $this->hasVipAccess($user)) {

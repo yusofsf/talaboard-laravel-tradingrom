@@ -116,6 +116,53 @@ class TelegramCallbackTest extends TestCase
             && $request['code'] === '265395'
             && $request['telegram_user_id'] === '67890'
             && $request['telegram_chat_id'] === '12345');
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && collect($request['reply_markup']['keyboard'] ?? [])->flatten()->doesntContain('ثبت نام عضویت ویژه'));
+    }
+
+    public function test_connect_reports_a_site_error_instead_of_calling_the_code_invalid(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/link' => Http::response(['message' => 'سرویس عضویت موقتاً در دسترس نیست.'], 503),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '/connect 265395',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['text'] === 'سرویس عضویت موقتاً در دسترس نیست.');
+    }
+
+    public function test_unconnected_user_is_asked_to_enter_the_connect_code(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Http::fake([
+            '*/member' => Http::response(['linked' => false, 'vip' => false]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 12345],
+                'text' => 'قیمت لحظه‌ای',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['text'] === "لطفاً کد کانکت را وارد کنید:\n\n/connect CODE");
     }
 
     public function test_my_trades_shows_the_connected_users_buys_and_sells_without_a_side_prompt(): void
