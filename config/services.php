@@ -5,6 +5,7 @@ return [
         'url' => env('TALABOARD_API_URL'),
         'token' => env('TALABOARD_API_TOKEN'),
         'prices_path' => env('TALABOARD_PRICES_PATH', '/api/prices'),
+        'prices_cache_ttl' => env('TALABOARD_PRICES_CACHE_TTL', 5),
         'trades_path' => env('TALABOARD_TRADES_PATH', '/api/trading/trades'),
         'verify_ssl' => env('TALABOARD_VERIFY_SSL', true),
     ],

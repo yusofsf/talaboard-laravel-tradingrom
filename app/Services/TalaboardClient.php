@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\PriceSnapshot;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -25,6 +26,17 @@ class TalaboardClient
 
     public function prices(): Collection
     {
+        $ttl = max(0, (int) config('services.talaboard.prices_cache_ttl', 5));
+
+        if ($ttl === 0) {
+            return $this->fetchAndStorePrices();
+        }
+
+        return Cache::remember('talaboard:prices:v1', $ttl, fn () => $this->fetchAndStorePrices());
+    }
+
+    private function fetchAndStorePrices(): Collection
+    {
         $url = config('services.talaboard.url');
         $token = config('services.talaboard.token');
         $log = Log::channel(config('trading.log_channel', 'trading'));
@@ -37,7 +49,7 @@ class TalaboardClient
 
         if (! $url) {
             $log->warning('Live price API URL is not configured; using stored snapshots.');
-            return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
+            return $this->latestSnapshots();
         }
 
         try {
@@ -49,7 +61,7 @@ class TalaboardClient
             ]);
 
             // Keep the bot available during a temporary upstream outage.
-            return PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
+            return $this->latestSnapshots();
         }
 
         $savedSymbols = [];
@@ -73,7 +85,7 @@ class TalaboardClient
             $savedSymbols[] = $symbol;
         }
 
-        $snapshots = PriceSnapshot::latest()->get()->unique('symbol')->keyBy('symbol');
+        $snapshots = $this->latestSnapshots();
         $log->info('Live prices processed.', [
             'received_items' => count($items),
             'saved_symbols' => array_values(array_unique($savedSymbols)),
@@ -81,6 +93,14 @@ class TalaboardClient
         ]);
 
         return $snapshots;
+    }
+
+    private function latestSnapshots(): Collection
+    {
+        return PriceSnapshot::query()
+            ->whereIn('id', PriceSnapshot::query()->selectRaw('MAX(id)')->groupBy('symbol'))
+            ->get()
+            ->keyBy('symbol');
     }
 
     private function fetchPriceItems(string $url, ?string $token): array

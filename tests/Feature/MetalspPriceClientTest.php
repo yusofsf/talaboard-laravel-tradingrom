@@ -4,12 +4,20 @@ namespace Tests\Feature;
 
 use App\Services\TalaboardClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 class MetalspPriceClientTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Cache::clear();
+    }
 
     public function test_it_fetches_prices_with_the_single_site_token(): void
     {
@@ -107,6 +115,46 @@ class MetalspPriceClientTest extends TestCase
         $prices = app(TalaboardClient::class)->prices();
 
         $this->assertSame('178827780', $prices->get('gold_gram')->price);
+        Http::assertSentCount(2);
+    }
+
+    public function test_it_reuses_recent_prices_without_calling_the_upstream_again(): void
+    {
+        config([
+            'services.talaboard.url' => 'https://site.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_cache_ttl' => 5,
+        ]);
+        Http::fake(['https://site.test/api/prices' => Http::response([
+            'gold' => ['geram' => 17_882_778],
+        ])]);
+
+        $client = app(TalaboardClient::class);
+        $first = $client->prices();
+        $second = $client->prices();
+
+        $this->assertSame('178827780', $first->get('gold_gram')->price);
+        $this->assertSame('178827780', $second->get('gold_gram')->price);
+        $this->assertDatabaseCount('price_snapshots', 1);
+        Http::assertSentCount(1);
+    }
+
+    public function test_price_cache_can_be_disabled(): void
+    {
+        config([
+            'services.talaboard.url' => 'https://site.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_cache_ttl' => 0,
+        ]);
+        Http::fake(['https://site.test/api/prices' => Http::response([
+            'gold' => ['geram' => 17_882_778],
+        ])]);
+
+        $client = app(TalaboardClient::class);
+        $client->prices();
+        $client->prices();
+
+        $this->assertDatabaseCount('price_snapshots', 2);
         Http::assertSentCount(2);
     }
 }
