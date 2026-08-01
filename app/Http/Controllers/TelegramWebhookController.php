@@ -85,16 +85,41 @@ class TelegramWebhookController extends Controller
 
     private function send($chat, string $text, array $keyboard = []): void
     {
-        $this->api('sendMessage', [
+        $data = [
             'chat_id' => $chat,
             'text' => $text,
             'reply_markup' => $keyboard ? ['keyboard' => $keyboard, 'resize_keyboard' => true] : null,
-        ]);
+        ];
+
+        if (config('services.telegram.defer_sends', true)) {
+            defer(fn () => $this->api('sendMessage', $data));
+
+            return;
+        }
+
+        $this->api('sendMessage', $data);
     }
 
     private function sendInline($chat, string $text, array $keyboard): array
     {
-        return $this->api('sendMessage', ['chat_id' => $chat, 'text' => $text, 'reply_markup' => ['inline_keyboard' => $keyboard]]);
+        $data = ['chat_id' => $chat, 'text' => $text, 'reply_markup' => ['inline_keyboard' => $keyboard]];
+
+        if (config('services.telegram.defer_sends', true)) {
+            defer(fn () => $this->api('sendMessage', $data));
+
+            return ['ok' => true, 'deferred' => true];
+        }
+
+        return $this->api('sendMessage', $data);
+    }
+
+    private function sendInlineWithResult($chat, string $text, array $keyboard): array
+    {
+        return $this->api('sendMessage', [
+            'chat_id' => $chat,
+            'text' => $text,
+            'reply_markup' => ['inline_keyboard' => $keyboard],
+        ]);
     }
 
     private function user(array $chat): User
@@ -554,7 +579,7 @@ class TelegramWebhookController extends Controller
             return false;
         }
 
-        $result = $this->sendInline($channel, $this->channelOfferText($trade), $this->offerAcceptKeyboard($trade));
+        $result = $this->sendInlineWithResult($channel, $this->channelOfferText($trade), $this->offerAcceptKeyboard($trade));
         $messageId = data_get($result, 'result.message_id');
         if (! $messageId) {
             return false;
@@ -1500,7 +1525,11 @@ class TelegramWebhookController extends Controller
 
     public function __invoke(Request $request, TalaboardClient $prices, TelegramConnectionService $connections)
     {
+        $startedAt = microtime(true);
         $this->traceId = (string) str()->uuid();
+        defer(fn () => $this->audit('update.completed', [
+            'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
+        ], 'info'));
         $this->audit('update.received', ['update_id' => $request->input('update_id'), 'has_message' => (bool) $request->input('message'), 'has_callback' => (bool) $request->input('callback_query')], 'info');
         if ($secret = env('TELEGRAM_WEBHOOK_SECRET')) {
             abort_unless(hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token')), 403);
@@ -1518,9 +1547,6 @@ class TelegramWebhookController extends Controller
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
-            if ($user) {
-                $menu = $this->menuForMembership($user, $menu);
-            }
             $callbackData = (string) ($callback['data'] ?? '');
             $this->audit('callback.received', ['callback_id' => $callback['id'] ?? null, 'data' => $callbackData, 'chat_id' => $chat['id'] ?? null, 'from_id' => data_get($callback, 'from.id')]);
             if ($user && $callbackData === 'flow:deposit:paid') {
@@ -1549,7 +1575,7 @@ class TelegramWebhookController extends Controller
 
         $message = $request->input('message');
         if (! $message) return response()->noContent();
-        $chat = $message['chat']; $user = $this->user($chat); $menu = $this->menuForMembership($user, $menu); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
+        $chat = $message['chat']; $user = $this->user($chat); $text = trim($message['text'] ?? ''); $photo = $message['photo'] ?? [];
         $this->audit('message.received', ['chat_id' => $chat['id'] ?? null, 'from_id' => data_get($message, 'from.id'), 'text' => $text, 'has_photo' => (bool) $photo]);
         if (preg_match('/^\/connect\s+(\d{6})$/', $text, $matches)) {
             try {
@@ -1594,6 +1620,7 @@ class TelegramWebhookController extends Controller
         }
         if ($text === 'وضعیت من' || $text === 'وضعیت حساب' || $text === 'وضعیت عضویت') {
             $membership = $this->siteMembership($user);
+            $menu = $this->menuForMembership($user, $menu);
             $status = (bool) ($membership['vip'] ?? false) || (int) ($membership['membership_level'] ?? 0) >= 2
                 ? 'عضو ویژه'
                 : (($membership['membership_status'] ?? '') === 'pending' ? 'درخواست عضویت ویژه در حال بررسی' : 'عضو عادی');
@@ -1611,6 +1638,7 @@ class TelegramWebhookController extends Controller
             $this->sendMembershipPrompt($chat['id'], $menu);
             return response()->noContent();
         }
+        $menu = $this->menuForMembership($user, $menu);
         $flow = $this->flow($user);
         if ($text === 'قیمت لحظه‌ای') { $this->send($chat['id'], $this->livePricesText($prices), $menu); return response()->noContent(); }
         if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {

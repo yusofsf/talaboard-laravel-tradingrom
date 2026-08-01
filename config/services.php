@@ -15,6 +15,7 @@ return [
     'telegram' => [
         'token' => env('TELEGRAM_BOT_TOKEN'),
         'connect_secret' => env('TELEGRAM_CONNECT_SECRET'),
+        'defer_sends' => env('TELEGRAM_DEFER_SENDS', env('APP_ENV') !== 'testing'),
         'channels' => [
             'gold' => env('TELEGRAM_CHANNEL_GOLD'),
             'silver_995' => env('TELEGRAM_CHANNEL_SILVER_995'),

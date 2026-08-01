@@ -8,6 +8,26 @@ use Tests\TestCase;
 
 class TelegramCallbackTest extends TestCase
 {
+    public function test_telegram_message_can_be_sent_after_the_webhook_response(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.telegram.defer_sends' => true,
+        ]);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '/connect',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['chat_id'] === 12345);
+    }
+
     public function test_main_menu_places_membership_registration_next_to_trade_channels(): void
     {
         config(['services.telegram.token' => 'test-token']);
