@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\{DepositRequest, InventoryDelivery, TelegramState, TelegramUpdate, Trade, User, WalletTransaction};
+use App\Models\{DepositRequest, InventoryDelivery, TelegramState, Trade, User, WalletTransaction};
 use App\Services\{TalaboardClient, TelegramConnectionService};
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\{Cache, DB, Http, Log, Schema, Storage};
@@ -11,6 +11,7 @@ class TelegramWebhookController extends Controller
 {
     private string $traceId = '';
     private ?string $lastSiteError = null;
+    private array $membershipByChat = [];
 
     private function audit(string $event, array $context = [], string $level = 'info'): void
     {
@@ -225,16 +226,23 @@ class TelegramWebhookController extends Controller
     private function siteMembership(User $user): array
     {
         $chatId = (string) $user->telegram_chat_id;
+        if (array_key_exists($chatId, $this->membershipByChat)) {
+            return $this->membershipByChat[$chatId];
+        }
+
         $key = 'telegram-membership:'.$chatId;
-        if (Cache::has($key)) {
-            return (array) Cache::get($key);
+        $missing = new \stdClass();
+        $cached = Cache::get($key, $missing);
+        if ($cached !== $missing) {
+            return $this->membershipByChat[$chatId] = (array) $cached;
         }
 
         // Keep compatibility with older connections written before the full
         // membership payload was cached.
         $legacyKey = 'telegram-linked:'.$chatId;
-        if (Cache::has($legacyKey) && ! $this->usesMembershipApi()) {
-            return ['linked' => (bool) Cache::get($legacyKey), 'vip' => false, 'membership_status' => 'none'];
+        $legacyLinked = Cache::get($legacyKey, $missing);
+        if ($legacyLinked !== $missing && ! $this->usesMembershipApi()) {
+            return $this->membershipByChat[$chatId] = ['linked' => (bool) $legacyLinked, 'vip' => false, 'membership_status' => 'none'];
         }
 
         $membership = $this->siteRequest('member', $user) ?? [];
@@ -244,7 +252,7 @@ class TelegramWebhookController extends Controller
         Cache::put($key, $membership, $ttl);
         Cache::put($legacyKey, $linked, $ttl);
 
-        return $membership;
+        return $this->membershipByChat[$chatId] = $membership;
     }
 
     private function hasConnectedAccess(User $user): bool
@@ -1498,9 +1506,12 @@ class TelegramWebhookController extends Controller
             abort_unless(hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token')), 403);
         }
 
-        if ($updateId = $request->input('update_id')) {
-            if (TelegramUpdate::where('update_id', $updateId)->exists()) return response()->noContent();
-            try { TelegramUpdate::create(['update_id' => $updateId, 'processed_at' => now()]); } catch (\Throwable) { return response()->noContent(); }
+        if ($request->filled('update_id')) {
+            $inserted = DB::table('telegram_updates')->insertOrIgnore([
+                'update_id' => (int) $request->input('update_id'),
+                'processed_at' => now(),
+            ]);
+            if ($inserted === 0) return response()->noContent();
         }
 
         $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['کانال‌های خرید و فروش', 'ثبت نام عضویت ویژه'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
@@ -1550,6 +1561,7 @@ class TelegramWebhookController extends Controller
                         Cache::forever('telegram-private-chat:'.data_get($message, 'from.id'), (string) $chat['id']);
                         Cache::put('telegram-linked:'.$chat['id'], true, now()->addDay());
                         Cache::put('telegram-membership:'.$chat['id'], $member, now()->addDay());
+                        $this->membershipByChat[(string) $chat['id']] = $member;
                         $menu = $this->menuForMembership($user, $menu);
                         $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
                     }
@@ -1557,7 +1569,9 @@ class TelegramWebhookController extends Controller
                     $connections->connect($matches[1], (string) data_get($message, 'from.id'), (string) $chat['id'], data_get($message, 'from.username'));
                     Cache::forever('telegram-private-chat:'.data_get($message, 'from.id'), (string) $chat['id']);
                     Cache::put('telegram-linked:'.$chat['id'], true, now()->addDay());
-                    Cache::put('telegram-membership:'.$chat['id'], ['linked' => true, 'vip' => false, 'membership_status' => 'none'], now()->addDay());
+                    $membership = ['linked' => true, 'vip' => false, 'membership_status' => 'none'];
+                    Cache::put('telegram-membership:'.$chat['id'], $membership, now()->addDay());
+                    $this->membershipByChat[(string) $chat['id']] = $membership;
                     $this->send($chat['id'], 'حساب سایت شما با موفقیت به تلگرام متصل شد.', $menu);
                 }
             } catch (\Illuminate\Validation\ValidationException $exception) {

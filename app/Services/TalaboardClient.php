@@ -10,6 +10,8 @@ use Illuminate\Support\Facades\Log;
 
 class TalaboardClient
 {
+    private ?Collection $resolvedPrices = null;
+
     public const PRODUCTS = [
         'gold_gram' => 'گرم طلا', 'gold_mesghal' => 'مثقال طلا',
         'silver_995_gram' => 'گرم نقره ۹۹۵', 'silver_995_mesghal' => 'مثقال نقره ۹۹۵',
@@ -32,7 +34,17 @@ class TalaboardClient
             return $this->fetchAndStorePrices();
         }
 
-        return Cache::remember('talaboard:prices:v1', $ttl, fn () => $this->fetchAndStorePrices());
+        if ($this->resolvedPrices !== null) {
+            return $this->resolvedPrices;
+        }
+
+        $staleTtl = max($ttl, (int) config('services.talaboard.prices_stale_ttl', 60));
+
+        return $this->resolvedPrices = Cache::flexible(
+            'talaboard:prices:v1',
+            [$ttl, $staleTtl],
+            fn () => $this->fetchAndStorePrices(),
+        );
     }
 
     private function fetchAndStorePrices(): Collection
@@ -123,7 +135,8 @@ class TalaboardClient
         foreach ($attempts as [$path, $attemptToken]) {
             $request = Http::acceptJson()
                 ->withOptions(['verify' => config('services.talaboard.verify_ssl', true)])
-                ->timeout(10);
+                ->connectTimeout((int) config('services.talaboard.prices_connect_timeout', 2))
+                ->timeout((int) config('services.talaboard.prices_timeout', 4));
 
             if ($attemptToken) {
                 $request = $request->withToken($attemptToken);
