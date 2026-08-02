@@ -32,6 +32,24 @@ class TelegramWebhookController extends Controller
 
     private int|string|null $callbackChatId = null;
 
+    private bool $captureWebhookReply = false;
+
+    private ?array $webhookReply = null;
+
+    private function captureSendMessage(array $data): bool
+    {
+        if (! $this->captureWebhookReply || $this->webhookReply !== null) {
+            return false;
+        }
+
+        $this->webhookReply = [
+            'method' => 'sendMessage',
+            ...array_filter($data, static fn ($value) => $value !== null),
+        ];
+
+        return true;
+    }
+
     private function logger(): mixed
     {
         $channel = (string) config('trading.log_channel', 'trading');
@@ -157,6 +175,10 @@ class TelegramWebhookController extends Controller
             'reply_markup' => $keyboard ? ['keyboard' => $keyboard, 'resize_keyboard' => true] : null,
         ];
 
+        if ($this->captureSendMessage($data)) {
+            return;
+        }
+
         if (config('services.telegram.defer_sends', true)) {
             defer(fn () => $this->api('sendMessage', $data));
 
@@ -169,6 +191,10 @@ class TelegramWebhookController extends Controller
     private function sendInline($chat, string $text, array $keyboard): array
     {
         $data = ['chat_id' => $chat, 'text' => $text, 'reply_markup' => ['inline_keyboard' => $keyboard]];
+
+        if ($this->captureSendMessage($data)) {
+            return ['ok' => true, 'webhook_reply' => true];
+        }
 
         if (config('services.telegram.defer_sends', true)) {
             defer(fn () => $this->api('sendMessage', $data));
@@ -1771,6 +1797,30 @@ class TelegramWebhookController extends Controller
         if (config('services.telegram.async_webhook', true)) {
             $update = $request->all();
             $callbackId = data_get($update, 'callback_query.id');
+
+            // Message replies can be returned as a Bot API method in the
+            // webhook response itself. This bypasses slow/filtered outbound
+            // connectivity from the VPS to api.telegram.org.
+            if ($request->input('message') && config('services.telegram.fast_webhook_reply', true)) {
+                if ($request->input('message.photo')) {
+                    ProcessTelegramUpdate::dispatch($update);
+
+                    return response()->json([
+                        'method' => 'sendMessage',
+                        'chat_id' => $request->input('message.chat.id'),
+                        'text' => 'تصویر دریافت شد و در حال پردازش است.',
+                    ]);
+                }
+
+                $this->captureWebhookReply = true;
+                $request->attributes->set('telegram_ingress_verified', true);
+                $processed = $this->process($request, $prices, $connections);
+
+                return $this->webhookReply
+                    ? response()->json($this->webhookReply)
+                    : $processed;
+            }
+
             if ($callbackId) {
                 $update['_callback_pre_answered'] = true;
             }
@@ -1790,6 +1840,7 @@ class TelegramWebhookController extends Controller
                 return response()->json([
                     'method' => 'answerCallbackQuery',
                     'callback_query_id' => $callbackId,
+                    'text' => 'در حال انجام…',
                 ]);
             }
 

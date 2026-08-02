@@ -26,11 +26,57 @@ class TelegramCallbackTest extends TestCase
         $response->assertOk()->assertExactJson([
             'method' => 'answerCallbackQuery',
             'callback_query_id' => 'fast-callback-id',
+            'text' => 'در حال انجام…',
         ]);
         Queue::assertPushed(ProcessTelegramUpdate::class, fn (ProcessTelegramUpdate $job) => data_get($job->update, 'callback_query.id') === 'fast-callback-id'
             && ($job->update['_callback_pre_answered'] ?? false) === true
         );
         Http::assertNothingSent();
+    }
+
+    public function test_message_uses_direct_webhook_reply_without_outbound_telegram_request(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_webhook_reply' => true,
+        ]);
+        Http::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '/connect',
+            ],
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('method', 'sendMessage')
+            ->assertJsonPath('chat_id', 12345);
+        Http::assertNothingSent();
+    }
+
+    public function test_photo_is_acknowledged_immediately_and_processed_after_response(): void
+    {
+        config([
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_webhook_reply' => true,
+        ]);
+        Queue::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'photo' => [['file_id' => 'photo-id']],
+            ],
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('method', 'sendMessage')
+            ->assertJsonPath('chat_id', 12345);
+        Queue::assertPushed(ProcessTelegramUpdate::class);
     }
 
     public function test_deferred_webhook_processes_without_a_queue_worker(): void
