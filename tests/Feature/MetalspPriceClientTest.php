@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\PriceSnapshot;
 use App\Services\TalaboardClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Cache;
@@ -156,5 +157,41 @@ class MetalspPriceClientTest extends TestCase
 
         $this->assertDatabaseCount('price_snapshots', 2);
         Http::assertSentCount(2);
+    }
+
+    public function test_a_cache_failure_does_not_block_live_prices(): void
+    {
+        config([
+            'services.talaboard.url' => 'https://site.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_cache_ttl' => 5,
+        ]);
+        Http::fake(['https://site.test/api/prices' => Http::response([
+            'gold' => ['geram' => 17_882_778],
+        ])]);
+        Cache::shouldReceive('flexible')->once()->andThrow(new \RuntimeException('Cache is unavailable.'));
+
+        $prices = app(TalaboardClient::class)->prices();
+
+        $this->assertSame('178827780', $prices->get('gold_gram')->price);
+        Http::assertSentCount(1);
+    }
+
+    public function test_a_snapshot_storage_failure_does_not_block_live_prices(): void
+    {
+        config([
+            'services.talaboard.url' => 'https://site.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_cache_ttl' => 0,
+        ]);
+        Http::fake(['https://site.test/api/prices' => Http::response([
+            'gold' => ['geram' => 17_882_778],
+        ])]);
+        PriceSnapshot::creating(fn () => throw new \RuntimeException('Database is unavailable.'));
+
+        $prices = app(TalaboardClient::class)->prices();
+
+        $this->assertSame('178827780', $prices->get('gold_gram')->price);
+        $this->assertDatabaseCount('price_snapshots', 0);
     }
 }

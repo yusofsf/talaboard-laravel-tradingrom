@@ -56,11 +56,20 @@ class TalaboardClient
 
         $staleTtl = max($ttl, (int) config('services.talaboard.prices_stale_ttl', 60));
 
-        return $this->resolvedPrices = Cache::flexible(
-            'talaboard:prices:v1',
-            [$ttl, $staleTtl],
-            fn () => $this->fetchAndStorePrices(),
-        );
+        try {
+            return $this->resolvedPrices = Cache::flexible(
+                'talaboard:prices:v1',
+                [$ttl, $staleTtl],
+                fn () => $this->fetchAndStorePrices(),
+            );
+        } catch (\Throwable $exception) {
+            $this->logger()->warning('Live price cache is unavailable; fetching prices directly.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return $this->resolvedPrices = $this->fetchAndStorePrices();
+        }
     }
 
     private function fetchAndStorePrices(): Collection
@@ -78,7 +87,7 @@ class TalaboardClient
         if (! $url) {
             $log->warning('Live price API URL is not configured; using stored snapshots.');
 
-            return $this->latestSnapshots();
+            return $this->safeLatestSnapshots();
         }
 
         try {
@@ -90,10 +99,10 @@ class TalaboardClient
             ]);
 
             // Keep the bot available during a temporary upstream outage.
-            return $this->latestSnapshots();
+            return $this->safeLatestSnapshots();
         }
 
-        $savedSymbols = [];
+        $liveSnapshots = collect();
         foreach ($items as $key => $item) {
             if (! is_array($item)) {
                 continue;
@@ -113,18 +122,34 @@ class TalaboardClient
             if (! is_numeric($price)) {
                 continue;
             }
-            PriceSnapshot::create([
+            $liveSnapshots->put($symbol, new PriceSnapshot([
                 'symbol' => $symbol,
                 'title' => self::PRODUCTS[$symbol],
                 // Metalsp publishes prices in toman, while every trading
                 // amount in this application is stored in rial.
                 'price' => (int) round((float) $price * 10),
                 'source_updated_at' => $item['updated_at'] ?? now(),
-            ]);
-            $savedSymbols[] = $symbol;
+            ]));
         }
 
-        $snapshots = $this->latestSnapshots();
+        $savedSymbols = [];
+        try {
+            foreach ($liveSnapshots as $symbol => $snapshot) {
+                $snapshot->save();
+                $savedSymbols[] = $symbol;
+            }
+        } catch (\Throwable $exception) {
+            // Persistence is a fallback for outages and must never prevent a
+            // valid upstream response from being shown to the user.
+            $log->warning('Unable to store live price snapshots; using in-memory prices.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        // Fill products omitted by the current response from stored snapshots,
+        // while always preferring the just-fetched values.
+        $snapshots = $this->safeLatestSnapshots()->toBase()->merge($liveSnapshots);
         $log->info('Live prices processed.', [
             'received_items' => count($items),
             'saved_symbols' => array_values(array_unique($savedSymbols)),
@@ -140,6 +165,20 @@ class TalaboardClient
             ->whereIn('id', PriceSnapshot::query()->selectRaw('MAX(id)')->groupBy('symbol'))
             ->get()
             ->keyBy('symbol');
+    }
+
+    private function safeLatestSnapshots(): Collection
+    {
+        try {
+            return $this->latestSnapshots();
+        } catch (\Throwable $exception) {
+            $this->logger()->warning('Stored price snapshots are unavailable.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return collect();
+        }
     }
 
     private function fetchPriceItems(string $url, ?string $token): array
