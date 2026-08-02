@@ -65,6 +65,57 @@ class TelegramCallbackTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_start_reply_does_not_wait_for_an_uncached_membership_request(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_webhook_reply' => true,
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'membership-token',
+        ]);
+        Http::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 24680],
+                'from' => ['id' => 24680],
+                'text' => '/start',
+            ],
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('method', 'sendMessage')
+            ->assertJsonPath('chat_id', 24680);
+        Http::assertNothingSent();
+    }
+
+    public function test_connect_command_is_acknowledged_before_membership_validation(): void
+    {
+        config([
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_webhook_reply' => true,
+            'services.telegram.webhook_queue' => 'deferred',
+        ]);
+        Queue::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 13579],
+                'from' => ['id' => 13579],
+                'text' => '/connect 123456',
+            ],
+        ]);
+
+        $response->assertOk()->assertExactJson([
+            'method' => 'sendMessage',
+            'chat_id' => 13579,
+            'text' => 'در حال اتصال حساب شما…',
+        ]);
+        Queue::assertPushed(ProcessTelegramUpdate::class, fn (ProcessTelegramUpdate $job) => data_get($job->update, 'message.text') === '/connect 123456');
+        Http::assertNothingSent();
+    }
+
     public function test_photo_is_acknowledged_immediately_and_processed_after_response(): void
     {
         config([

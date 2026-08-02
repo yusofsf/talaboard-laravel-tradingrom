@@ -1862,6 +1862,28 @@ class TelegramWebhookController extends Controller
                     ]);
                 }
 
+                // Linking is one of the first interactions a new user has
+                // with the bot and requires a round trip to the membership
+                // service. Acknowledge it through the webhook immediately,
+                // then perform the slow validation after the response.
+                $messageText = trim((string) $request->input('message.text', ''));
+                if (preg_match('/^\/connect\s+\d{6}$/', $messageText)) {
+                    try {
+                        ProcessTelegramUpdate::dispatch($update);
+
+                        return response()->json([
+                            'method' => 'sendMessage',
+                            'chat_id' => $request->input('message.chat.id'),
+                            'text' => 'در حال اتصال حساب شما…',
+                        ]);
+                    } catch (\Throwable $exception) {
+                        $this->audit('connect.dispatch.failed', [
+                            'queue' => config('services.telegram.webhook_queue'),
+                            'exception' => $exception::class,
+                        ], 'error');
+                    }
+                }
+
                 $this->captureWebhookReply = true;
                 $request->attributes->set('telegram_ingress_verified', true);
                 $processed = $this->process($request, $prices, $connections);
@@ -2001,8 +2023,14 @@ class TelegramWebhookController extends Controller
         }
         if ($text === '/start') {
             $welcome = 'به ربات معاملات برخط طلا و نقره خوش آمدید.';
-            if (! $this->hasConnectedAccess($user)) {
-                $welcome .= "\n\nلطفاً کد کانکت را وارد کنید:\n\n/connect CODE";
+
+            // Do not make the welcome message wait for an uncached membership
+            // API request. A connected local user or a cached remote member is
+            // enough to hide the optional connection hint; unknown users can
+            // still continue immediately while the membership cache is cold.
+            $cachedMembership = Cache::get('telegram-membership:'.(string) $user->telegram_chat_id);
+            if (! $user->exists && ! (bool) data_get($cachedMembership, 'linked', false)) {
+                $welcome .= "\n\nاگر حساب سایت هنوز متصل نیست، کد اتصال را با این فرمت بفرستید:\n\n/connect CODE";
             }
             $this->send($chat['id'], $welcome, $menu);
 
