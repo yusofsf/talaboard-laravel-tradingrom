@@ -17,7 +17,7 @@ return [
         'connect_secret' => env('TELEGRAM_CONNECT_SECRET'),
         'defer_sends' => env('TELEGRAM_DEFER_SENDS', env('APP_ENV') !== 'testing'),
         'async_webhook' => env('TELEGRAM_ASYNC_WEBHOOK', env('APP_ENV') !== 'testing'),
-        'webhook_queue' => env('TELEGRAM_WEBHOOK_QUEUE', 'database'),
+        'webhook_queue' => env('TELEGRAM_WEBHOOK_QUEUE', 'deferred'),
         'connect_timeout' => env('TELEGRAM_CONNECT_TIMEOUT', 5),
         'timeout' => env('TELEGRAM_TIMEOUT', 10),
         'retry_attempts' => env('TELEGRAM_RETRY_ATTEMPTS', 1),

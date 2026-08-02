@@ -19,7 +19,7 @@ class ProcessTelegramUpdate implements ShouldQueue
 
     public function __construct(public array $update)
     {
-        $this->onConnection((string) config('services.telegram.webhook_queue', 'background'));
+        $this->onConnection((string) config('services.telegram.webhook_queue', 'deferred'));
         $this->onQueue('telegram');
     }
 

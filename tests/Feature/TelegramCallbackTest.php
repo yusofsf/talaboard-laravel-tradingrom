@@ -33,6 +33,28 @@ class TelegramCallbackTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_deferred_webhook_processes_without_a_queue_worker(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.telegram.async_webhook' => true,
+            'services.telegram.webhook_queue' => 'deferred',
+            'services.telegram.defer_sends' => true,
+        ]);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '/connect',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['chat_id'] === 12345);
+    }
+
     public function test_telegram_message_can_be_sent_after_the_webhook_response(): void
     {
         config([

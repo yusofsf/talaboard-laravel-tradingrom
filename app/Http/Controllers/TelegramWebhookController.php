@@ -74,10 +74,16 @@ class TelegramWebhookController extends Controller
             return $value;
         };
 
-        $this->logger()->log($level, 'telegram.'.$event, [
-            'trace_id' => $this->traceId ?: null,
-            ...$safe($context),
-        ]);
+        try {
+            $this->logger()->log($level, 'telegram.'.$event, [
+                'trace_id' => $this->traceId ?: null,
+                ...$safe($context),
+            ]);
+        } catch (\Throwable $exception) {
+            // A filesystem permission or stale logger config must not stop
+            // Telegram processing. PHP's error log is the last-resort trace.
+            error_log('telegram.'.$event.' logging failed: '.$exception->getMessage());
+        }
     }
 
     private function api(string $method, array $data): array
@@ -1736,9 +1742,21 @@ class TelegramWebhookController extends Controller
 
     public function __invoke(Request $request, TalaboardClient $prices, TelegramConnectionService $connections)
     {
+        $this->traceId = (string) str()->uuid();
+
         if ($secret = env('TELEGRAM_WEBHOOK_SECRET')) {
-            abort_unless(hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token')), 403);
+            if (! hash_equals($secret, (string) $request->header('X-Telegram-Bot-Api-Secret-Token'))) {
+                $this->audit('webhook.rejected', ['reason' => 'invalid_secret'], 'warning');
+                abort(403);
+            }
         }
+
+        $this->audit('webhook.accepted', [
+            'update_id' => $request->input('update_id'),
+            'queue' => config('services.telegram.webhook_queue'),
+            'has_message' => (bool) $request->input('message'),
+            'has_callback' => (bool) $request->input('callback_query'),
+        ]);
 
         if ($request->filled('update_id')) {
             $inserted = DB::table('telegram_updates')->insertOrIgnore([
@@ -1756,7 +1774,17 @@ class TelegramWebhookController extends Controller
             if ($callbackId) {
                 $update['_callback_pre_answered'] = true;
             }
-            ProcessTelegramUpdate::dispatch($update);
+            try {
+                ProcessTelegramUpdate::dispatch($update);
+            } catch (\Throwable $exception) {
+                $this->audit('dispatch.failed', [
+                    'queue' => config('services.telegram.webhook_queue'),
+                    'exception' => $exception::class,
+                ], 'error');
+                $request->attributes->set('telegram_ingress_verified', true);
+
+                return $this->process($request, $prices, $connections);
+            }
 
             if ($callbackId) {
                 return response()->json([
