@@ -53,6 +53,27 @@ class TelegramCallbackTest extends TestCase
             && $request['chat_id'] === 12345);
     }
 
+    public function test_missing_trading_log_channel_does_not_block_a_bot_reply(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.telegram.defer_sends' => false,
+            'trading.log_channel' => 'missing-trading-channel',
+            'logging.channels.missing-trading-channel' => null,
+        ]);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '/connect',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage'));
+    }
+
     public function test_main_menu_places_membership_registration_next_to_trade_channels(): void
     {
         config(['services.telegram.token' => 'test-token']);

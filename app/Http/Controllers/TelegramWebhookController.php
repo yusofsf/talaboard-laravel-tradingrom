@@ -32,6 +32,24 @@ class TelegramWebhookController extends Controller
 
     private int|string|null $callbackChatId = null;
 
+    private function logger(): mixed
+    {
+        $channel = (string) config('trading.log_channel', 'trading');
+
+        try {
+            if (! config("logging.channels.{$channel}")) {
+                $fallback = (string) config('logging.default', 'stack');
+                config(["logging.channels.{$channel}" => config("logging.channels.{$fallback}")]);
+            }
+
+            return Log::channel($channel);
+        } catch (\Throwable) {
+            // Logging must never prevent the bot from answering. The log
+            // manager can still route this through its emergency logger.
+            return Log::getFacadeRoot();
+        }
+    }
+
     private function audit(string $event, array $context = [], string $level = 'info'): void
     {
         $safe = static function ($value, $key = '') use (&$safe) {
@@ -56,7 +74,7 @@ class TelegramWebhookController extends Controller
             return $value;
         };
 
-        Log::channel(config('trading.log_channel', 'trading'))->log($level, 'telegram.'.$event, [
+        $this->logger()->log($level, 'telegram.'.$event, [
             'trace_id' => $this->traceId ?: null,
             ...$safe($context),
         ]);
@@ -89,10 +107,15 @@ class TelegramWebhookController extends Controller
             // Telegram expects reply_markup to be a JSON object. When this was
             // sent as form data, nested keyboard arrays were not parsed as a
             // keyboard, so users only saw the "select ..." prompt.
+            $options = ['force_ip_resolve' => 'v4'];
+            if ($proxy = config('services.telegram.proxy')) {
+                $options['proxy'] = $proxy;
+            }
+
             $request = Http::asJson()
-                ->connectTimeout((int) config('services.telegram.connect_timeout', 1))
-                ->timeout((int) config('services.telegram.timeout', 2))
-                ->withOptions(['force_ip_resolve' => 'v4']);
+                ->connectTimeout((int) config('services.telegram.connect_timeout', 5))
+                ->timeout((int) config('services.telegram.timeout', 10))
+                ->withOptions($options);
             $attempts = max(1, (int) config('services.telegram.retry_attempts', 1));
             if ($attempts > 1) {
                 $request = $request->retry($attempts, (int) config('services.telegram.retry_delay', 100));
@@ -1557,7 +1580,7 @@ class TelegramWebhookController extends Controller
                 $this->sendInline($chat['id'], 'واحد را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:trade:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:trade:unit:mesghal']]]);
             }
 
-return true;
+            return true;
         }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'unit' && ($flow['type'] ?? '') === 'trade') {
             $flow['unit'] = $parts[3];
@@ -1578,7 +1601,7 @@ return true;
                 $this->send($chat['id'], 'قیمت واحد دلخواه را به تومان وارد کنید.', $menu);
             }
 
-return true;
+            return true;
         }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'partial' && ($flow['type'] ?? '') === 'trade') {
             $flow['allow_partial'] = ($parts[3] ?? '') === 'yes';
@@ -1598,7 +1621,7 @@ return true;
                 $this->sendInline($chat['id'], 'واحد را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]);
             }
 
-return true;
+            return true;
         }
         if (($parts[1] ?? '') === 'delivery' && ($parts[2] ?? '') === 'unit' && ($flow['type'] ?? '') === 'delivery') {
             $flow['unit'] = $parts[3];
@@ -2068,7 +2091,7 @@ return true;
                 }
             }
 
-return response()->noContent();
+            return response()->noContent();
         }
         if (($flow['type'] ?? '') === 'trade' && ($flow['stage'] ?? '') === 'custom_price') {
             if (! is_numeric($text) || (int) $text < 1) {
@@ -2080,7 +2103,7 @@ return response()->noContent();
                 $this->sendInline($chat['id'], 'آیا پذیرش بخشی از این معامله مجاز باشد؟', [[['text' => 'بله، جزئی یا کامل', 'callback_data' => 'flow:trade:partial:yes'], ['text' => 'خیر، فقط کامل', 'callback_data' => 'flow:trade:partial:no']]]);
             }
 
-return response()->noContent();
+            return response()->noContent();
         }
         if ($text === 'قیمت لحظه‌ای') {
             $labels = TalaboardClient::PRODUCTS;
@@ -2119,7 +2142,7 @@ return response()->noContent();
                 $this->send($chat['id'], 'ثبت درخواست در سایت ناموفق بود؛ مبلغ را بررسی کنید.', $menu);
             }
 
-return response()->noContent();
+            return response()->noContent();
         }
         if ($photo) {
             $depositId = Cache::pull('site-deposit:'.$user->telegram_chat_id);

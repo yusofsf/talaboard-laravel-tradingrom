@@ -12,6 +12,22 @@ class TalaboardClient
 {
     private ?Collection $resolvedPrices = null;
 
+    private function logger(): mixed
+    {
+        $channel = (string) config('trading.log_channel', 'trading');
+
+        try {
+            if (! config("logging.channels.{$channel}")) {
+                $fallback = (string) config('logging.default', 'stack');
+                config(["logging.channels.{$channel}" => config("logging.channels.{$fallback}")]);
+            }
+
+            return Log::channel($channel);
+        } catch (\Throwable) {
+            return Log::getFacadeRoot();
+        }
+    }
+
     public const PRODUCTS = [
         'gold_gram' => 'گرم طلا', 'gold_mesghal' => 'مثقال طلا',
         'silver_995_gram' => 'گرم نقره ۹۹۵', 'silver_995_mesghal' => 'مثقال نقره ۹۹۵',
@@ -51,7 +67,7 @@ class TalaboardClient
     {
         $url = config('services.talaboard.url');
         $token = config('services.talaboard.token');
-        $log = Log::channel(config('trading.log_channel', 'trading'));
+        $log = $this->logger();
 
         $log->debug('Live price request started.', [
             'base_url' => $url,
@@ -61,6 +77,7 @@ class TalaboardClient
 
         if (! $url) {
             $log->warning('Live price API URL is not configured; using stored snapshots.');
+
             return $this->latestSnapshots();
         }
 
@@ -78,14 +95,24 @@ class TalaboardClient
 
         $savedSymbols = [];
         foreach ($items as $key => $item) {
-            if (! is_array($item)) continue;
+            if (! is_array($item)) {
+                continue;
+            }
             $symbol = is_string($key) ? $key : ($item['symbol'] ?? null);
             // نام‌های قدیمی API به دو قیمت عمومی طلا نگاشت می‌شوند.
-            if ($symbol === 'gold_9999_gram' || $symbol === 'gold_995_gram') $symbol = 'gold_gram';
-            if ($symbol === 'gold_9999_mesghal' || $symbol === 'gold_995_mesghal') $symbol = 'gold_mesghal';
-            if (! $symbol || ! isset(self::PRODUCTS[$symbol])) continue;
+            if ($symbol === 'gold_9999_gram' || $symbol === 'gold_995_gram') {
+                $symbol = 'gold_gram';
+            }
+            if ($symbol === 'gold_9999_mesghal' || $symbol === 'gold_995_mesghal') {
+                $symbol = 'gold_mesghal';
+            }
+            if (! $symbol || ! isset(self::PRODUCTS[$symbol])) {
+                continue;
+            }
             $price = $item['price'] ?? $item['last_price'] ?? null;
-            if (! is_numeric($price)) continue;
+            if (! is_numeric($price)) {
+                continue;
+            }
             PriceSnapshot::create([
                 'symbol' => $symbol,
                 'title' => self::PRODUCTS[$symbol],
@@ -143,12 +170,12 @@ class TalaboardClient
             }
 
             $endpoint = rtrim($url, '/').$path;
-            Log::channel(config('trading.log_channel', 'trading'))->debug('Calling live price endpoint.', [
+            $this->logger()->debug('Calling live price endpoint.', [
                 'endpoint' => $endpoint,
                 'authorization' => $attemptToken ? 'bearer' : 'none',
             ]);
             $response = $request->get($endpoint);
-            Log::channel(config('trading.log_channel', 'trading'))->log(
+            $this->logger()->log(
                 $response->successful() ? 'info' : 'warning',
                 'Live price endpoint responded.',
                 [
@@ -197,11 +224,14 @@ class TalaboardClient
 
     public function registerTrade(array $payload): ?string
     {
-        if (! config('services.talaboard.url')) return null;
+        if (! config('services.talaboard.url')) {
+            return null;
+        }
         $response = Http::acceptJson()->withToken(config('services.talaboard.token'))
             ->withOptions(['verify' => config('services.talaboard.verify_ssl', true)])
             ->post(rtrim(config('services.talaboard.url'), '/').config('services.talaboard.trades_path'), $payload);
         $response->throw();
+
         return (string) ($response->json('reference') ?? $response->json('id') ?? '');
     }
 }

@@ -15,7 +15,7 @@ class ProcessTelegramUpdate implements ShouldQueue
 
     public int $tries = 1;
 
-    public int $timeout = 30;
+    public int $timeout = 45;
 
     public function __construct(public array $update)
     {
@@ -28,6 +28,11 @@ class ProcessTelegramUpdate implements ShouldQueue
         TalaboardClient $prices,
         TelegramConnectionService $connections,
     ): void {
+        // This job may run from Laravel's deferred queue after the HTTP
+        // response has already been sent. Send Telegram requests directly;
+        // nesting another deferred callback can leave them unexecuted.
+        config(['services.telegram.defer_sends' => false]);
+
         $request = Request::create('/api/telegram/webhook', 'POST', $this->update);
         $request->attributes->set('telegram_ingress_verified', true);
         $controller->process($request, $prices, $connections);
