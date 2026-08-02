@@ -1,4 +1,4 @@
-; Optional high-throughput mode. Set TELEGRAM_WEBHOOK_QUEUE=database before use.
+; Required for queued Telegram callbacks (TELEGRAM_CALLBACK_QUEUE=telegram).
 [program:talaboard-telegram-worker]
 process_name=%(program_name)s_%(process_num)02d
 command=/usr/bin/php /home/metalspi/talaboard-laravel-tradingrom/artisan queue:work database --queue=telegram --sleep=1 --tries=1 --timeout=45 --max-time=3600

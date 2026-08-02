@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ProcessTelegramCallback;
 use App\Jobs\ProcessTelegramUpdate;
 use App\Models\DepositRequest;
 use App\Models\TelegramState;
@@ -1784,6 +1785,37 @@ class TelegramWebhookController extends Controller
             'has_callback' => (bool) $request->input('callback_query'),
         ]);
 
+        $asyncWebhook = (bool) config('services.telegram.async_webhook', true);
+        $update = $request->all();
+        $callbackId = data_get($update, 'callback_query.id');
+
+        if ($asyncWebhook && $callbackId) {
+            $update['_callback_pre_answered'] = true;
+
+            try {
+                ProcessTelegramCallback::dispatch($update);
+            } catch (\Throwable $exception) {
+                $this->audit('callback.dispatch.failed', [
+                    'queue_connection' => config('services.telegram.callback_queue_connection'),
+                    'queue' => config('services.telegram.callback_queue'),
+                    'exception' => $exception::class,
+                ], 'error');
+
+                return response()->json([
+                    'method' => 'answerCallbackQuery',
+                    'callback_query_id' => $callbackId,
+                    'text' => 'ثبت درخواست ناموفق بود؛ دوباره تلاش کنید.',
+                    'show_alert' => true,
+                ]);
+            }
+
+            return response()->json([
+                'method' => 'answerCallbackQuery',
+                'callback_query_id' => $callbackId,
+                'text' => 'در حال انجام…',
+            ]);
+        }
+
         if ($request->filled('update_id')) {
             $inserted = DB::table('telegram_updates')->insertOrIgnore([
                 'update_id' => (int) $request->input('update_id'),
@@ -1794,10 +1826,7 @@ class TelegramWebhookController extends Controller
             }
         }
 
-        if (config('services.telegram.async_webhook', true)) {
-            $update = $request->all();
-            $callbackId = data_get($update, 'callback_query.id');
-
+        if ($asyncWebhook) {
             // Message replies can be returned as a Bot API method in the
             // webhook response itself. This bypasses slow/filtered outbound
             // connectivity from the VPS to api.telegram.org.
@@ -1821,9 +1850,6 @@ class TelegramWebhookController extends Controller
                     : $processed;
             }
 
-            if ($callbackId) {
-                $update['_callback_pre_answered'] = true;
-            }
             try {
                 ProcessTelegramUpdate::dispatch($update);
             } catch (\Throwable $exception) {
@@ -1834,14 +1860,6 @@ class TelegramWebhookController extends Controller
                 $request->attributes->set('telegram_ingress_verified', true);
 
                 return $this->process($request, $prices, $connections);
-            }
-
-            if ($callbackId) {
-                return response()->json([
-                    'method' => 'answerCallbackQuery',
-                    'callback_query_id' => $callbackId,
-                    'text' => 'در حال انجام…',
-                ]);
             }
 
             return response()->noContent();

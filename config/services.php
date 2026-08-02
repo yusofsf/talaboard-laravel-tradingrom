@@ -19,6 +19,8 @@ return [
         'async_webhook' => env('TELEGRAM_ASYNC_WEBHOOK', env('APP_ENV') !== 'testing'),
         'fast_webhook_reply' => env('TELEGRAM_FAST_WEBHOOK_REPLY', env('APP_ENV') !== 'testing'),
         'webhook_queue' => env('TELEGRAM_WEBHOOK_QUEUE', 'deferred'),
+        'callback_queue_connection' => env('TELEGRAM_CALLBACK_QUEUE_CONNECTION', 'database'),
+        'callback_queue' => env('TELEGRAM_CALLBACK_QUEUE', 'telegram'),
         'connect_timeout' => env('TELEGRAM_CONNECT_TIMEOUT', 5),
         'timeout' => env('TELEGRAM_TIMEOUT', 10),
         'retry_attempts' => env('TELEGRAM_RETRY_ATTEMPTS', 1),
