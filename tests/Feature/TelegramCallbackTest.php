@@ -2,12 +2,37 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ProcessTelegramUpdate;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class TelegramCallbackTest extends TestCase
 {
+    public function test_webhook_dispatches_processing_and_acknowledges_callback_immediately(): void
+    {
+        config(['services.telegram.async_webhook' => true]);
+        Queue::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'fast-callback-id',
+                'data' => 'flow:delivery:start',
+                'message' => ['chat' => ['id' => 12345]],
+            ],
+        ]);
+
+        $response->assertOk()->assertExactJson([
+            'method' => 'answerCallbackQuery',
+            'callback_query_id' => 'fast-callback-id',
+        ]);
+        Queue::assertPushed(ProcessTelegramUpdate::class, fn (ProcessTelegramUpdate $job) => data_get($job->update, 'callback_query.id') === 'fast-callback-id'
+            && ($job->update['_callback_pre_answered'] ?? false) === true
+        );
+        Http::assertNothingSent();
+    }
+
     public function test_telegram_message_can_be_sent_after_the_webhook_response(): void
     {
         config([
