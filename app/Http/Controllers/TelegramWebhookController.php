@@ -564,11 +564,12 @@ class TelegramWebhookController extends Controller
         $trades = collect($response['offers'] ?? $response['trades'] ?? $response ?? [])
             ->filter(fn ($trade) => is_array($trade))
             ->filter(fn (array $trade) => ($trade['side'] ?? $trade['type'] ?? null) === $side)
+            ->filter(fn (array $trade) => $this->tradeUnit($trade) !== 'mesghal')
             ->filter(fn (array $trade) => Trade::meetsMinimumQuantity($this->tradeUnit($trade), (float) ($trade['quantity'] ?? 0), (string) ($trade['asset'] ?? $trade['item'] ?? '')))
             ->map(fn (array $trade) => $this->normalizeOffer($trade))
             ->values();
         if ($response === null) {
-            $trades = Trade::query()->tradable()->where('side', $side)->whereIn('status', ['submitted', 'active'])
+            $trades = Trade::query()->tradable()->where('side', $side)->where('unit', '!=', 'mesghal')->whereIn('status', ['submitted', 'active'])
                 ->latest('traded_at')->get()->map(fn (Trade $trade) => $this->normalizeOffer([
                     'id' => $trade->id,
                     'side' => $trade->side,
@@ -684,6 +685,9 @@ class TelegramWebhookController extends Controller
     private function publishOfferToChannel(array $trade): bool
     {
         $trade = $this->normalizeOffer($trade);
+        if (($trade['unit'] ?? '') === 'mesghal') {
+            return false;
+        }
         $channel = $this->channelForAsset((string) ($trade['asset'] ?? $trade['item'] ?? ''));
         if (! $channel || empty($trade['id'])) {
             Log::channel(config('trading.log_channel', 'trading'))->warning('Trade offer channel is not configured.', [
@@ -1397,13 +1401,29 @@ class TelegramWebhookController extends Controller
 
     private function assetKeyboard(string $prefix): array
     {
-        return [[
+        return $this->withMainMenuButton([[
             ['text' => 'طلا', 'callback_data' => "$prefix:gold"],
         ], [
             ['text' => 'نقره ۹۹۵', 'callback_data' => "$prefix:silver_995"], ['text' => 'نقره ۹۹۹.۹', 'callback_data' => "$prefix:silver_9999"],
         ], [
             ['text' => 'تمام سکه', 'callback_data' => "$prefix:full_coin"], ['text' => 'نیم سکه', 'callback_data' => "$prefix:half_coin"], ['text' => 'ربع سکه', 'callback_data' => "$prefix:quarter_coin"],
-        ]];
+        ]]);
+    }
+
+    private function withMainMenuButton(array $keyboard): array
+    {
+        $keyboard[] = [['text' => '↩️ بازگشت به منوی اصلی', 'callback_data' => 'flow:main_menu']];
+
+        return $keyboard;
+    }
+
+    private function flowReplyMenu(array $menu): array
+    {
+        if (! collect($menu)->flatten()->contains('بازگشت به منوی اصلی')) {
+            $menu[] = ['بازگشت به منوی اصلی'];
+        }
+
+        return $menu;
     }
 
     private function isCoin(string $asset): bool
@@ -1484,14 +1504,23 @@ class TelegramWebhookController extends Controller
 
     private function completeTelegramTrade(User $user, array $flow, array $chat, array $menu): void
     {
+        $selection = filled($flow['last_selection'] ?? null) ? $flow['last_selection']."\n\n" : '';
+
         if (! $this->hasVipAccess($user)) {
             $this->sendMembershipPrompt($chat['id'], $menu);
 
             return;
         }
 
+        if (($flow['unit'] ?? '') === 'mesghal') {
+            $this->clearFlow($user);
+            $this->send($chat['id'], $selection.'معامله بر حسب مثقال غیرفعال است؛ معامله جدید را بر حسب گرم ثبت کنید.', $menu);
+
+            return;
+        }
+
         if (! $this->meetsMinimumTradeQuantity($flow['unit'], (float) $flow['quantity'], $flow['asset'])) {
-            $this->send($chat['id'], 'حداقل مقدار معامله نقره ۱۰۰ گرم یا ۲۱٫۷۰۲ مثقال است.', $menu);
+            $this->send($chat['id'], $selection.'حداقل مقدار معامله نقره ۱۰۰ گرم است.', $menu);
 
             return;
         }
@@ -1541,9 +1570,9 @@ class TelegramWebhookController extends Controller
             }
             $this->clearFlow($user);
             $status = $published ? 'معامله ثبت و به کانال دارایی ارسال شد.' : 'معامله ثبت شد، اما ارسال به کانال انجام نشد؛ تنظیم کانال را بررسی کنید.';
-            $this->send($chat['id'], $status."\n".'قیمت واحد: '.$this->formatToman($trade->unit_price).' تومان'."\n".'مبلغ کل: '.$this->formatToman($trade->total_price).' تومان', $menu);
+            $this->send($chat['id'], $selection.$status."\n".'قیمت واحد: '.$this->formatToman($trade->unit_price).' تومان'."\n".'مبلغ کل: '.$this->formatToman($trade->total_price).' تومان', $menu);
         } catch (\Throwable $e) {
-            $this->send($chat['id'], 'ثبت معامله انجام نشد: '.$e->getMessage(), $menu);
+            $this->send($chat['id'], $selection.'ثبت معامله انجام نشد: '.$e->getMessage(), $menu);
         }
     }
 
@@ -1558,68 +1587,60 @@ class TelegramWebhookController extends Controller
         $flow = $this->flow($user);
         $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
 
-        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'side') {
-            $this->send($chat['id'], 'معامله '.(($parts[3] ?? '') === 'buy' ? 'خرید' : 'فروش').' انتخاب شد.');
-        }
-        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'asset') {
-            $this->send($chat['id'], 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.');
-        }
-        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'unit') {
-            $this->send($chat['id'], 'واحد '.(($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال').' انتخاب شد.');
-        }
-        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'price') {
-            $this->send($chat['id'], (($parts[3] ?? '') === 'default' ? 'قیمت سایت' : 'ورود قیمت دلخواه').' انتخاب شد.');
+        if ($data === 'flow:main_menu') {
+            $this->clearFlow($user);
+            $this->send($chat['id'], 'به منوی اصلی برگشتید.', $menu);
+
+            return true;
         }
 
         // The button label and its side must have the same meaning.
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'asset') {
             $this->saveFlow($user, ['type' => 'trade', 'stage' => 'side', 'asset' => $parts[3]]);
-            $this->sendInline($chat['id'], 'نوع معامله را انتخاب کنید:', [[
+            $this->sendInline($chat['id'], 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? ''))."» انتخاب شد.\n\nنوع معامله را انتخاب کنید:", $this->withMainMenuButton([[
                 ['text' => 'فروش', 'callback_data' => 'flow:trade:side:sell'],
                 ['text' => 'خرید', 'callback_data' => 'flow:trade:side:buy'],
-            ]]);
+            ]]));
 
             return true;
         }
 
         if ($data === 'flow:deposit:paid') {
             $this->saveFlow($user, ['type' => 'deposit', 'stage' => 'amount']);
-            $this->send($chat['id'], 'مبلغ واریزی را به ریال وارد کنید.', $menu);
+            $this->send($chat['id'], "گزینه «واریز کردم» انتخاب شد.\n\nمبلغ واریزی را به ریال وارد کنید.", $this->flowReplyMenu($menu));
 
             return true;
         }
         if ($data === 'flow:delivery:start') {
             $this->saveFlow($user, ['type' => 'delivery', 'stage' => 'asset']);
-            $this->sendInline($chat['id'], 'دارایی تحویل‌داده‌شده را انتخاب کنید:', $this->assetKeyboard('flow:delivery:asset'));
-
-            return true;
-        }
-        if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'asset') {
-            $this->saveFlow($user, ['type' => 'trade', 'stage' => 'side', 'asset' => $parts[3]]);
-            $this->sendInline($chat['id'], 'نوع معامله را انتخاب کنید:', [[['text' => 'فروش', 'callback_data' => 'flow:trade:side:buy'], ['text' => 'خرید', 'callback_data' => 'flow:trade:side:sell']]]);
+            $this->sendInline($chat['id'], "گزینه «تحویل به فروشگاه» انتخاب شد.\n\nدارایی تحویل‌داده‌شده را انتخاب کنید:", $this->assetKeyboard('flow:delivery:asset'));
 
             return true;
         }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'side' && ($flow['type'] ?? '') === 'trade') {
             $flow['side'] = $parts[3];
-            $flow['stage'] = 'unit';
+            $flow['unit'] = $this->isCoin($flow['asset']) ? 'count' : 'gram';
+            $flow['stage'] = 'quantity';
             $this->saveFlow($user, $flow);
+            $selected = 'نوع معامله «'.(($parts[3] ?? '') === 'buy' ? 'خرید' : 'فروش').'» انتخاب شد.';
             if ($this->isCoin($flow['asset'])) {
-                $flow['unit'] = 'count';
-                $flow['stage'] = 'quantity';
-                $this->saveFlow($user, $flow);
-                $this->send($chat['id'], 'تعداد سکه را وارد کنید.', $menu);
+                $this->send($chat['id'], $selected."\n\nتعداد سکه را وارد کنید.", $this->flowReplyMenu($menu));
             } else {
-                $this->sendInline($chat['id'], 'واحد را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:trade:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:trade:unit:mesghal']]]);
+                $this->send($chat['id'], $selected."\n\nمقدار معامله را به گرم وارد کنید.", $this->flowReplyMenu($menu));
             }
 
             return true;
         }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'unit' && ($flow['type'] ?? '') === 'trade') {
-            $flow['unit'] = $parts[3];
+            if (($parts[3] ?? '') !== 'gram') {
+                $this->send($chat['id'], 'معامله بر حسب مثقال غیرفعال است؛ مقدار را به گرم وارد کنید.', $this->flowReplyMenu($menu));
+
+                return true;
+            }
+            $flow['unit'] = 'gram';
             $flow['stage'] = 'quantity';
             $this->saveFlow($user, $flow);
-            $this->send($chat['id'], 'مقدار را وارد کنید.', $menu);
+            $this->send($chat['id'], "واحد «گرم» انتخاب شد.\n\nمقدار معامله را وارد کنید.", $this->flowReplyMenu($menu));
 
             return true;
         }
@@ -1627,31 +1648,33 @@ class TelegramWebhookController extends Controller
             if (($parts[3] ?? '') === 'default') {
                 $flow['stage'] = 'partial_mode';
                 $this->saveFlow($user, $flow);
-                $this->sendInline($chat['id'], 'آیا پذیرش بخشی از این معامله مجاز باشد؟', [[['text' => 'بله، جزئی یا کامل', 'callback_data' => 'flow:trade:partial:yes'], ['text' => 'خیر، فقط کامل', 'callback_data' => 'flow:trade:partial:no']]]);
+                $this->sendInline($chat['id'], "قیمت سایت انتخاب شد.\n\nآیا پذیرش بخشی از این معامله مجاز باشد؟", $this->withMainMenuButton([[['text' => 'بله، جزئی یا کامل', 'callback_data' => 'flow:trade:partial:yes'], ['text' => 'خیر، فقط کامل', 'callback_data' => 'flow:trade:partial:no']]]));
             } else {
                 $flow['stage'] = 'custom_price';
                 $this->saveFlow($user, $flow);
-                $this->send($chat['id'], 'قیمت واحد دلخواه را به تومان وارد کنید.', $menu);
+                $this->send($chat['id'], "ورود قیمت دلخواه انتخاب شد.\n\nقیمت واحد دلخواه را به تومان وارد کنید.", $this->flowReplyMenu($menu));
             }
 
             return true;
         }
         if (($parts[1] ?? '') === 'trade' && ($parts[2] ?? '') === 'partial' && ($flow['type'] ?? '') === 'trade') {
             $flow['allow_partial'] = ($parts[3] ?? '') === 'yes';
+            $flow['last_selection'] = $flow['allow_partial'] ? 'پذیرش جزئی یا کامل انتخاب شد.' : 'پذیرش فقط به‌صورت کامل انتخاب شد.';
             $this->completeTelegramTrade($user, $flow, $chat, $menu);
 
             return true;
         }
         if (($parts[1] ?? '') === 'delivery' && ($parts[2] ?? '') === 'asset') {
             $flow = ['type' => 'delivery', 'stage' => 'unit', 'asset' => $parts[3]];
+            $selected = 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.';
             if ($this->isCoin($flow['asset'])) {
                 $flow['unit'] = 'count';
                 $flow['stage'] = 'quantity';
                 $this->saveFlow($user, $flow);
-                $this->send($chat['id'], 'تعداد سکه تحویل‌داده‌شده را وارد کنید.', $menu);
+                $this->send($chat['id'], $selected."\n\nتعداد سکه تحویل‌داده‌شده را وارد کنید.", $this->flowReplyMenu($menu));
             } else {
                 $this->saveFlow($user, $flow);
-                $this->sendInline($chat['id'], 'واحد را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]);
+                $this->sendInline($chat['id'], $selected."\n\nواحد را انتخاب کنید:", $this->withMainMenuButton([[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]));
             }
 
             return true;
@@ -1660,7 +1683,8 @@ class TelegramWebhookController extends Controller
             $flow['unit'] = $parts[3];
             $flow['stage'] = 'quantity';
             $this->saveFlow($user, $flow);
-            $this->send($chat['id'], 'مقدار تحویل‌داده‌شده را وارد کنید.', $menu);
+            $unit = ($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال';
+            $this->send($chat['id'], "واحد «{$unit}» انتخاب شد.\n\nمقدار تحویل‌داده‌شده را وارد کنید.", $this->flowReplyMenu($menu));
 
             return true;
         }
@@ -1679,30 +1703,24 @@ class TelegramWebhookController extends Controller
         $parts = explode(':', $data);
         $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
 
-        if (($parts[2] ?? '') === 'asset') {
-            $this->send($chat['id'], 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.');
-        }
-        if (($parts[2] ?? '') === 'unit') {
-            $this->send($chat['id'], 'واحد '.(($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال').' انتخاب شد.');
-        }
-
         if ($data === 'flow:delivery:start') {
             $this->saveFlow($user, ['type' => 'delivery', 'stage' => 'asset']);
-            $this->sendInline($chat['id'], 'دارایی تحویلی را انتخاب کنید:', $this->assetKeyboard('flow:delivery:asset'));
+            $this->sendInline($chat['id'], "گزینه «تحویل به فروشگاه» انتخاب شد.\n\nدارایی تحویلی را انتخاب کنید:", $this->assetKeyboard('flow:delivery:asset'));
 
             return true;
         }
 
         if (($parts[2] ?? '') === 'asset') {
             $flow = ['type' => 'delivery', 'stage' => 'unit', 'asset' => $parts[3] ?? ''];
+            $selected = 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.';
             if ($this->isCoin($flow['asset'])) {
                 $flow['unit'] = 'count';
                 $flow['stage'] = 'quantity';
                 $this->saveFlow($user, $flow);
-                $this->send($chat['id'], 'تعداد سکهٔ تحویلی را وارد کنید.', $menu);
+                $this->send($chat['id'], $selected."\n\nتعداد سکهٔ تحویلی را وارد کنید.", $this->flowReplyMenu($menu));
             } else {
                 $this->saveFlow($user, $flow);
-                $this->sendInline($chat['id'], 'واحد وزن را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]);
+                $this->sendInline($chat['id'], $selected."\n\nواحد وزن را انتخاب کنید:", $this->withMainMenuButton([[['text' => 'گرم', 'callback_data' => 'flow:delivery:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:delivery:unit:mesghal']]]));
             }
 
             return true;
@@ -1713,7 +1731,8 @@ class TelegramWebhookController extends Controller
             $flow['unit'] = $parts[3] ?? '';
             $flow['stage'] = 'quantity';
             $this->saveFlow($user, $flow);
-            $this->send($chat['id'], 'مقدار وزن تحویلی را وارد کنید.', $menu);
+            $unit = ($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال';
+            $this->send($chat['id'], "واحد «{$unit}» انتخاب شد.\n\nمقدار وزن تحویلی را وارد کنید.", $this->flowReplyMenu($menu));
 
             return true;
         }
@@ -1734,21 +1753,22 @@ class TelegramWebhookController extends Controller
 
         if ($data === 'flow:collateral:start') {
             $this->saveFlow($user, ['type' => 'collateral', 'stage' => 'asset']);
-            $this->sendInline($chat['id'], 'دارایی بیعانه را انتخاب کنید:', $this->assetKeyboard('flow:collateral:asset'));
+            $this->sendInline($chat['id'], "گزینه «ثبت بیعانه دارایی» انتخاب شد.\n\nدارایی بیعانه را انتخاب کنید:", $this->assetKeyboard('flow:collateral:asset'));
 
             return true;
         }
 
         if (($parts[2] ?? '') === 'asset') {
             $flow = ['type' => 'collateral', 'stage' => 'unit', 'asset' => $parts[3] ?? ''];
+            $selected = 'دارایی «'.$this->assetLabel((string) ($parts[3] ?? '')).'» انتخاب شد.';
             if ($this->isCoin($flow['asset'])) {
                 $flow['unit'] = 'count';
                 $flow['stage'] = 'quantity';
                 $this->saveFlow($user, $flow);
-                $this->send($chat['id'], 'تعداد سکه بیعانه را وارد کنید.', $menu);
+                $this->send($chat['id'], $selected."\n\nتعداد سکه بیعانه را وارد کنید.", $this->flowReplyMenu($menu));
             } else {
                 $this->saveFlow($user, $flow);
-                $this->sendInline($chat['id'], 'واحد وزن بیعانه را انتخاب کنید:', [[['text' => 'گرم', 'callback_data' => 'flow:collateral:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:collateral:unit:mesghal']]]);
+                $this->sendInline($chat['id'], $selected."\n\nواحد وزن بیعانه را انتخاب کنید:", $this->withMainMenuButton([[['text' => 'گرم', 'callback_data' => 'flow:collateral:unit:gram'], ['text' => 'مثقال', 'callback_data' => 'flow:collateral:unit:mesghal']]]));
             }
 
             return true;
@@ -1759,7 +1779,8 @@ class TelegramWebhookController extends Controller
             $flow['unit'] = $parts[3] ?? '';
             $flow['stage'] = 'quantity';
             $this->saveFlow($user, $flow);
-            $this->send($chat['id'], 'مقدار بیعانه را وارد کنید.', $menu);
+            $unit = ($parts[3] ?? '') === 'gram' ? 'گرم' : 'مثقال';
+            $this->send($chat['id'], "واحد «{$unit}» انتخاب شد.\n\nمقدار بیعانه را وارد کنید.", $this->flowReplyMenu($menu));
 
             return true;
         }
@@ -1907,8 +1928,7 @@ class TelegramWebhookController extends Controller
             if ($user && $callbackData === 'flow:deposit:paid') {
                 $this->saveFlow($user, ['type' => 'deposit', 'stage' => 'amount']);
                 $this->api('answerCallbackQuery', ['callback_query_id' => $callback['id']]);
-                $this->send($chat['id'], 'گزینه «واریز کردم» انتخاب شد.');
-                $this->send($chat['id'], 'مبلغ واریزی را به ریال وارد کنید.', $menu);
+                $this->send($chat['id'], "گزینه «واریز کردم» انتخاب شد.\n\nمبلغ واریزی را به ریال وارد کنید.", $this->flowReplyMenu($menu));
 
                 return response()->noContent();
             }
@@ -2025,23 +2045,29 @@ class TelegramWebhookController extends Controller
         }
         $menu = $this->menuForMembership($user, $menu);
         $flow = $this->flow($user);
+        if ($text === 'بازگشت به منوی اصلی') {
+            $this->clearFlow($user);
+            $this->send($chat['id'], 'به منوی اصلی برگشتید.', $menu);
+
+            return response()->noContent();
+        }
         if ($text === 'قیمت لحظه‌ای') {
             $this->send($chat['id'], $this->livePricesText($prices), $menu);
 
             return response()->noContent();
         }
         if (in_array($text, ['افزایش موجودی انبار', 'افزایش موجودی', 'درخواست افزایش موجودی'], true)) {
-            $this->sendInline($chat['id'], 'دارایی تحویلی را انتخاب کنید. پس از ثبت، درخواست تحویل به فروشگاه برای تأیید یا رد ادمین ارسال می‌شود.', [[['text' => 'تحویل به فروشگاه', 'callback_data' => 'flow:delivery:start']]]);
+            $this->sendInline($chat['id'], 'دارایی تحویلی را انتخاب کنید. پس از ثبت، درخواست تحویل به فروشگاه برای تأیید یا رد ادمین ارسال می‌شود.', $this->withMainMenuButton([[['text' => 'تحویل به فروشگاه', 'callback_data' => 'flow:delivery:start']]]));
 
             return response()->noContent();
         }
         if ($text === 'بیعانه دارایی') {
-            $this->sendInline($chat['id'], 'برای بیعانه، دارایی را انتخاب کنید. پس از ثبت، ادمین در سایت سقف مجاز معامله را برای این بیعانه تعیین می‌کند.', [[['text' => 'ثبت بیعانه دارایی', 'callback_data' => 'flow:collateral:start']]]);
+            $this->sendInline($chat['id'], 'برای بیعانه، دارایی را انتخاب کنید. پس از ثبت، ادمین در سایت سقف مجاز معامله را برای این بیعانه تعیین می‌کند.', $this->withMainMenuButton([[['text' => 'ثبت بیعانه دارایی', 'callback_data' => 'flow:collateral:start']]]));
 
             return response()->noContent();
         }
         if ($text === 'واریز وجه' || $text === 'شارژ کیف پول') {
-            $this->sendInline($chat['id'], 'شماره کارت: '.config('trading.card_number')."\nشماره حساب: ".config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینهٔ زیر را بزنید تا مبلغ و تصویر فیش را ارسال کنید.", [[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]);
+            $this->sendInline($chat['id'], 'شماره کارت: '.config('trading.card_number')."\nشماره حساب: ".config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینهٔ زیر را بزنید تا مبلغ و تصویر فیش را ارسال کنید.", $this->withMainMenuButton([[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]));
 
             return response()->noContent();
         }
@@ -2180,7 +2206,7 @@ class TelegramWebhookController extends Controller
                     $flow['unit_price'] = $snapshot->price;
                     $flow['stage'] = 'price';
                     $this->saveFlow($user, $flow);
-                    $this->sendInline($chat['id'], 'قیمت پیش‌فرض سایت: '.$this->formatToman($snapshot->price).' تومان. انتخاب کنید:', [[['text' => 'تأیید قیمت سایت', 'callback_data' => 'flow:trade:price:default'], ['text' => 'ورود قیمت دیگر', 'callback_data' => 'flow:trade:price:custom']]]);
+                    $this->sendInline($chat['id'], 'قیمت پیش‌فرض سایت: '.$this->formatToman($snapshot->price).' تومان. انتخاب کنید:', $this->withMainMenuButton([[['text' => 'تأیید قیمت سایت', 'callback_data' => 'flow:trade:price:default'], ['text' => 'ورود قیمت دیگر', 'callback_data' => 'flow:trade:price:custom']]]));
                 } else {
                     $flow['stage'] = 'custom_price';
                     $this->saveFlow($user, $flow);
@@ -2197,7 +2223,7 @@ class TelegramWebhookController extends Controller
                 $flow['unit_price'] = (int) $text * 10;
                 $flow['stage'] = 'partial_mode';
                 $this->saveFlow($user, $flow);
-                $this->sendInline($chat['id'], 'آیا پذیرش بخشی از این معامله مجاز باشد؟', [[['text' => 'بله، جزئی یا کامل', 'callback_data' => 'flow:trade:partial:yes'], ['text' => 'خیر، فقط کامل', 'callback_data' => 'flow:trade:partial:no']]]);
+                $this->sendInline($chat['id'], 'آیا پذیرش بخشی از این معامله مجاز باشد؟', $this->withMainMenuButton([[['text' => 'بله، جزئی یا کامل', 'callback_data' => 'flow:trade:partial:yes'], ['text' => 'خیر، فقط کامل', 'callback_data' => 'flow:trade:partial:no']]]));
             }
 
             return response()->noContent();
@@ -2213,12 +2239,12 @@ class TelegramWebhookController extends Controller
             return response()->noContent();
         }
         if ($text === 'واریز وجه' || $text === 'شارژ کیف پول') {
-            $this->sendInline($chat['id'], 'شماره حساب: '.config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینه زیر را بزنید.", [[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]);
+            $this->sendInline($chat['id'], 'شماره حساب: '.config('trading.account_number')."\nشماره شبا: ".config('trading.iban')."\nبه نام: ".config('trading.account_holder')."\n\nپس از واریز، گزینه زیر را بزنید.", $this->withMainMenuButton([[['text' => 'واریز کردم', 'callback_data' => 'flow:deposit:paid']]]));
 
             return response()->noContent();
         }
         if ($text === 'افزایش موجودی' || $text === 'درخواست افزایش موجودی') {
-            $this->sendInline($chat['id'], 'برای افزایش موجودی، ابتدا دارایی را به فروشگاه تحویل دهید. پس از تحویل، گزینه زیر را بزنید.', [[['text' => 'تحویل دادم', 'callback_data' => 'flow:delivery:start']]]);
+            $this->sendInline($chat['id'], 'برای افزایش موجودی، ابتدا دارایی را به فروشگاه تحویل دهید. پس از تحویل، گزینه زیر را بزنید.', $this->withMainMenuButton([[['text' => 'تحویل دادم', 'callback_data' => 'flow:delivery:start']]]));
 
             return response()->noContent();
         }
@@ -2269,6 +2295,11 @@ class TelegramWebhookController extends Controller
 
                 return response()->noContent();
             } [, $side, $unit, $qty] = array_pad(explode(' ', $text), 4, null);
+            if ($unit === 'mesghal') {
+                $this->send($chat['id'], 'معامله بر حسب مثقال غیرفعال است؛ واحد گرم را وارد کنید.', $menu);
+
+                return response()->noContent();
+            }
             $trade = $this->siteRequest('trades', $user, ['side' => $side, 'unit' => $unit, 'quantity' => $qty]);
             $this->send($chat['id'], $trade ? 'معامله در سایت ثبت شد. قیمت واحد: '.$this->formatToman($trade['price_per_unit']).' تومان، مبلغ کل: '.$this->formatToman($trade['total']).' تومان' : 'ثبت معامله در سایت ناموفق بود؛ موجودی و مقدار را بررسی کنید.', $menu);
 

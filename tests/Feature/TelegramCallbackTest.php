@@ -777,4 +777,106 @@ class TelegramCallbackTest extends TestCase
             && $request['show_alert'] === true);
         Http::assertNotSent(fn ($request) => str_contains($request->url(), '/offers/40/accept'));
     }
+
+    public function test_trade_callback_shows_the_previous_selection_in_the_next_prompt(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Cache::put('telegram-flow:77777', ['type' => 'trade', 'stage' => 'asset']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'asset-callback',
+                'data' => 'flow:trade:asset:gold',
+                'from' => ['id' => 77777],
+                'message' => ['message_id' => 100, 'chat' => ['id' => 77777]],
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(function ($request) {
+            $keyboard = $request['reply_markup']['inline_keyboard'] ?? [];
+
+            return str_contains($request->url(), '/sendMessage')
+                && str_contains((string) $request['text'], 'دارایی «طلا» انتخاب شد.')
+                && str_contains((string) $request['text'], 'نوع معامله را انتخاب کنید:')
+                && collect($keyboard)->flatten(1)->contains(fn (array $button) => ($button['callback_data'] ?? '') === 'flow:main_menu');
+        });
+    }
+
+    public function test_trade_side_callback_uses_grams_without_offering_mesghal(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Cache::put('telegram-flow:88888', ['type' => 'trade', 'stage' => 'side', 'asset' => 'gold']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'side-callback',
+                'data' => 'flow:trade:side:buy',
+                'from' => ['id' => 88888],
+                'message' => ['message_id' => 101, 'chat' => ['id' => 88888]],
+            ],
+        ])->assertNoContent();
+
+        $flow = Cache::get('telegram-flow:88888');
+        $this->assertSame('gram', $flow['unit']);
+        $this->assertSame('quantity', $flow['stage']);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'نوع معامله «خرید» انتخاب شد.')
+            && str_contains((string) $request['text'], 'به گرم وارد کنید')
+            && ! str_contains((string) $request->body(), 'flow:trade:unit:mesghal'));
+    }
+
+    public function test_main_menu_callback_clears_the_active_flow(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Cache::put('telegram-flow:99999', ['type' => 'trade', 'stage' => 'quantity', 'asset' => 'gold', 'unit' => 'gram']);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'main-menu-callback',
+                'data' => 'flow:main_menu',
+                'from' => ['id' => 99999],
+                'message' => ['message_id' => 102, 'chat' => ['id' => 99999]],
+            ],
+        ])->assertNoContent();
+
+        $this->assertNull(Cache::get('telegram-flow:99999'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && $request['text'] === 'به منوی اصلی برگشتید.'
+            && in_array(['قیمت لحظه‌ای', 'ثبت معامله'], $request['reply_markup']['keyboard'] ?? [], true));
+    }
+
+    public function test_live_prices_are_displayed_in_toman_in_the_bot(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.talaboard.url' => 'https://prices.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_path' => '/api/prices',
+            'services.talaboard.prices_cache_ttl' => 0,
+        ]);
+        Cache::put('telegram-linked:12121', true, now()->addMinute());
+        Cache::put('telegram-membership:12121', ['linked' => true, 'vip' => true], now()->addMinute());
+        Http::fake([
+            'https://prices.test/api/prices' => Http::response([
+                'prices' => [['symbol' => 'gold_gram', 'price' => 8_798_000]],
+            ]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12121],
+                'from' => ['id' => 12121],
+                'text' => 'قیمت لحظه‌ای',
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'قیمت لحظه‌ای سایت (تومان)')
+            && str_contains((string) $request['text'], 'گرم طلا: 8,798,000 تومان')
+            && ! str_contains((string) $request['text'], 'گرم طلا: 87,980,000 تومان'));
+    }
 }

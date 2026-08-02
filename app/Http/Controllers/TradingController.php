@@ -12,7 +12,7 @@ class TradingController extends Controller
 
     public function storeTrade(Request $request, TradeService $service)
     {
-        $data = $request->validate(['side' => 'required|in:buy,sell', 'asset' => 'required|in:gold,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:mesghal,gram,count', 'quantity' => 'required|numeric|min:0.001', 'unit_price' => 'nullable|numeric|min:1', 'allow_partial' => 'sometimes|boolean', 'idempotency_key' => 'nullable|string|max:255']);
+        $data = $request->validate(['side' => 'required|in:buy,sell', 'asset' => 'required|in:gold,silver_995,silver_9999,full_coin,half_coin,quarter_coin', 'unit' => 'required|in:gram,count', 'quantity' => 'required|numeric|min:0.001', 'unit_price' => 'nullable|numeric|min:1', 'allow_partial' => 'sometimes|boolean', 'idempotency_key' => 'nullable|string|max:255']);
         return response()->json($service->create($request->user(), $data), 201);
     }
 
