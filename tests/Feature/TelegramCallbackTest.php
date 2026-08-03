@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Jobs\ProcessTelegramCallback;
 use App\Jobs\ProcessTelegramUpdate;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
@@ -88,6 +89,31 @@ class TelegramCallbackTest extends TestCase
             ->assertJsonPath('method', 'sendMessage')
             ->assertJsonPath('chat_id', 24680);
         Http::assertNothingSent();
+    }
+
+    public function test_start_cold_path_does_not_touch_database_or_cache(): void
+    {
+        config([
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_webhook_reply' => true,
+        ]);
+        DB::shouldReceive('table')->never();
+        Cache::shouldReceive('get')->never();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'update_id' => 987654,
+            'message' => [
+                'chat' => ['id' => 24680],
+                'from' => ['id' => 24680],
+                'text' => '/start',
+            ],
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('method', 'sendMessage')
+            ->assertJsonPath('chat_id', 24680)
+            ->assertJsonPath('reply_markup.resize_keyboard', true)
+            ->assertJsonCount(6, 'reply_markup.keyboard');
     }
 
     public function test_connect_command_is_acknowledged_before_membership_validation(): void

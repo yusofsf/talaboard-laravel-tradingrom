@@ -23,6 +23,17 @@ use Illuminate\Validation\ValidationException;
 
 class TelegramWebhookController extends Controller
 {
+    private const MAIN_MENU = [
+        ['قیمت لحظه‌ای', 'ثبت معامله'],
+        ['واریز وجه', 'معاملات من'],
+        ['سوابق من', 'نام مستعار'],
+        ['بیعانه دارایی', 'وضعیت عضویت'],
+        ['کانال‌های خرید و فروش', 'ثبت نام عضویت ویژه'],
+        ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار'],
+    ];
+
+    private const WELCOME_MESSAGE = "به ربات معاملات برخط طلا و نقره خوش آمدید.\n\nاگر حساب سایت هنوز متصل نیست، کد اتصال را با این فرمت بفرستید:\n\n/connect CODE";
+
     private string $traceId = '';
 
     private ?string $lastSiteError = null;
@@ -36,6 +47,34 @@ class TelegramWebhookController extends Controller
     private bool $captureWebhookReply = false;
 
     private ?array $webhookReply = null;
+
+    private function fastStartWebhookReply(Request $request): ?array
+    {
+        if (! config('services.telegram.async_webhook', true)
+            || ! config('services.telegram.fast_webhook_reply', true)) {
+            return null;
+        }
+
+        $text = trim((string) $request->input('message.text', ''));
+        $chatId = $request->input('message.chat.id');
+
+        // /start is the bot's cold path. Keep it independent from the
+        // database, cache and outbound HTTP so Telegram can deliver the
+        // welcome message in the webhook response itself.
+        if (! preg_match('/^\/start(?:@[A-Za-z0-9_]+)?$/', $text) || blank($chatId)) {
+            return null;
+        }
+
+        return [
+            'method' => 'sendMessage',
+            'chat_id' => $chatId,
+            'text' => self::WELCOME_MESSAGE,
+            'reply_markup' => [
+                'keyboard' => self::MAIN_MENU,
+                'resize_keyboard' => true,
+            ],
+        ];
+    }
 
     private function captureSendMessage(array $data): bool
     {
@@ -1799,6 +1838,15 @@ class TelegramWebhookController extends Controller
             }
         }
 
+        if ($reply = $this->fastStartWebhookReply($request)) {
+            defer(fn () => $this->audit('webhook.fast_start', [
+                'update_id' => $request->input('update_id'),
+                'chat_id' => $request->input('message.chat.id'),
+            ]));
+
+            return response()->json($reply);
+        }
+
         $this->audit('webhook.accepted', [
             'update_id' => $request->input('update_id'),
             'queue' => config('services.telegram.webhook_queue'),
@@ -1941,7 +1989,7 @@ class TelegramWebhookController extends Controller
             }
         }
 
-        $menu = [['قیمت لحظه‌ای', 'ثبت معامله'], ['واریز وجه', 'معاملات من'], ['سوابق من', 'نام مستعار'], ['بیعانه دارایی', 'وضعیت عضویت'], ['کانال‌های خرید و فروش', 'ثبت نام عضویت ویژه'], ['کیف پول و دارایی‌ها', 'افزایش موجودی انبار']];
+        $menu = self::MAIN_MENU;
         if ($callback = $request->input('callback_query')) {
             $chat = $callback['message']['chat'] ?? [];
             $user = $this->callbackUser($callback);
