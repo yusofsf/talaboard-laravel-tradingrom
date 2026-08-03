@@ -7,6 +7,7 @@ return [
         'prices_path' => env('TALABOARD_PRICES_PATH', '/api/prices'),
         'prices_cache_ttl' => env('TALABOARD_PRICES_CACHE_TTL', 15),
         'prices_stale_ttl' => env('TALABOARD_PRICES_STALE_TTL', 3600),
+        'prices_hot_cache_store' => env('TALABOARD_PRICES_HOT_CACHE_STORE', 'file'),
         'prices_connect_timeout' => env('TALABOARD_PRICES_CONNECT_TIMEOUT', 1),
         'prices_timeout' => env('TALABOARD_PRICES_TIMEOUT', 1),
         'trades_path' => env('TALABOARD_TRADES_PATH', '/api/trading/trades'),

@@ -36,6 +36,7 @@ class TelegramCallbackTest extends TestCase
             'callback_query_id' => 'fast-callback-id',
             'text' => 'در حال انجام…',
         ]);
+        $this->app->terminate();
         Queue::assertPushed(ProcessTelegramCallback::class, fn (ProcessTelegramCallback $job) => data_get($job->update, 'callback_query.id') === 'fast-callback-id'
             && ($job->update['_callback_pre_answered'] ?? false) === true
             && $job->connection === 'database'

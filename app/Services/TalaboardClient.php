@@ -14,6 +14,12 @@ class TalaboardClient
 
     private const PRICES_CACHE_CREATED_KEY = 'illuminate:cache:flexible:created:'.self::PRICES_CACHE_KEY;
 
+    private const PRICES_HOT_CACHE_KEY = 'talaboard:prices:hot:v1';
+
+    private const PRICES_HOT_CACHE_CREATED_KEY = 'talaboard:prices:hot:created:v1';
+
+    private const PRICES_HOT_REFRESH_LOCK = 'talaboard:prices:hot:refresh:v1';
+
     private ?Collection $resolvedPrices = null;
 
     private function logger(): mixed
@@ -60,6 +66,19 @@ class TalaboardClient
 
         $staleTtl = max($ttl, (int) config('services.talaboard.prices_stale_ttl', 60));
 
+        // This local L1 cache deliberately avoids the default cache store.
+        // Production commonly uses a database-backed cache, and establishing
+        // that connection after an idle period can be slower than the price
+        // request itself. A previously fetched price can be returned from the
+        // local filesystem immediately while it is refreshed after response.
+        if ($hot = $this->hotPrices()) {
+            if ($this->hotPricesAreStale($ttl)) {
+                defer(fn () => $this->refreshHotPrices(), 'talaboard:prices:hot-refresh');
+            }
+
+            return $this->resolvedPrices = $hot;
+        }
+
         try {
             $cached = Cache::many([
                 self::PRICES_CACHE_KEY,
@@ -80,11 +99,17 @@ class TalaboardClient
                 }
             }
 
-            return $this->resolvedPrices = Cache::flexible(
+            $prices = Cache::flexible(
                 self::PRICES_CACHE_KEY,
                 [$ttl, $staleTtl],
                 fn () => $this->fetchAndStorePrices(),
             );
+            $this->storeHotPrices(
+                $prices,
+                (int) (Cache::get(self::PRICES_CACHE_CREATED_KEY) ?: now()->getTimestamp()),
+            );
+
+            return $this->resolvedPrices = $prices;
         } catch (\Throwable $exception) {
             $this->logger()->warning('Live price cache is unavailable; using durable snapshots.', [
                 'exception' => $exception::class,
@@ -93,6 +118,7 @@ class TalaboardClient
 
             $snapshots = $this->safeLatestSnapshots();
             if ($snapshots->isNotEmpty()) {
+                $this->storeHotPrices($snapshots, now()->subSeconds($ttl + 1)->getTimestamp());
                 defer(fn () => $this->refresh(), 'talaboard:prices:cold-refresh');
 
                 return $this->resolvedPrices = $snapshots;
@@ -128,7 +154,74 @@ class TalaboardClient
             ]);
         }
 
+        $this->storeHotPrices($prices, now()->getTimestamp());
+
         return $prices;
+    }
+
+    private function hotCache(): mixed
+    {
+        return Cache::store((string) config('services.talaboard.prices_hot_cache_store', 'file'));
+    }
+
+    private function hotPrices(): ?Collection
+    {
+        try {
+            $prices = $this->hotCache()->get(self::PRICES_HOT_CACHE_KEY);
+
+            return $prices instanceof Collection && $prices->isNotEmpty() ? $prices : null;
+        } catch (\Throwable $exception) {
+            $this->logger()->warning('Local live price cache is unavailable.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+
+            return null;
+        }
+    }
+
+    private function hotPricesAreStale(int $ttl): bool
+    {
+        try {
+            $createdAt = (int) $this->hotCache()->get(self::PRICES_HOT_CACHE_CREATED_KEY, 0);
+
+            return $createdAt === 0 || $createdAt <= now()->subSeconds($ttl)->getTimestamp();
+        } catch (\Throwable) {
+            return true;
+        }
+    }
+
+    private function storeHotPrices(Collection $prices, int $createdAt): void
+    {
+        if ($prices->isEmpty()) {
+            return;
+        }
+
+        try {
+            // Keep the last known good value indefinitely. Its timestamp, not
+            // cache eviction, determines when an asynchronous refresh is due.
+            $this->hotCache()->forever(self::PRICES_HOT_CACHE_KEY, $prices);
+            $this->hotCache()->forever(self::PRICES_HOT_CACHE_CREATED_KEY, $createdAt);
+        } catch (\Throwable $exception) {
+            $this->logger()->warning('Unable to update the local live price cache.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+        }
+    }
+
+    private function refreshHotPrices(): void
+    {
+        try {
+            $this->hotCache()->lock(self::PRICES_HOT_REFRESH_LOCK, 30)->get(
+                fn () => $this->refresh(),
+            );
+        } catch (\Throwable $exception) {
+            $this->logger()->warning('Unable to refresh the local live price cache.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+        }
     }
 
     private function fetchAndStorePrices(bool $storeSnapshots = true): Collection
