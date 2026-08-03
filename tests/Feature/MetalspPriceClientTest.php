@@ -140,6 +140,50 @@ class MetalspPriceClientTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    public function test_a_cold_cache_returns_the_latest_snapshot_before_refreshing_upstream(): void
+    {
+        config([
+            'services.talaboard.url' => 'https://site.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_cache_ttl' => 5,
+            'services.talaboard.prices_stale_ttl' => 60,
+        ]);
+        PriceSnapshot::create([
+            'symbol' => 'gold_gram',
+            'title' => 'گرم طلا',
+            'price' => 750_000_000,
+            'source_updated_at' => now()->subMinute(),
+        ]);
+        Http::fake(['https://site.test/api/prices' => Http::response([
+            'gold' => ['geram' => 80_000_000],
+        ])]);
+
+        $prices = app(TalaboardClient::class)->prices();
+
+        $this->assertSame('750000000', $prices->get('gold_gram')->price);
+        Http::assertNothingSent();
+    }
+
+    public function test_forced_refresh_warms_the_shared_price_cache(): void
+    {
+        config([
+            'services.talaboard.url' => 'https://site.test',
+            'services.talaboard.token' => null,
+            'services.talaboard.prices_cache_ttl' => 5,
+            'services.talaboard.prices_stale_ttl' => 60,
+        ]);
+        Http::fake(['https://site.test/api/prices' => Http::response([
+            'gold' => ['geram' => 80_000_000],
+        ])]);
+
+        app(TalaboardClient::class)->refresh();
+
+        $cached = Cache::get('talaboard:prices:v1');
+        $this->assertSame('800000000', $cached->get('gold_gram')->price);
+        $this->assertNotNull(Cache::get('illuminate:cache:flexible:created:talaboard:prices:v1'));
+        Http::assertSentCount(1);
+    }
+
     public function test_price_cache_can_be_disabled(): void
     {
         config([
@@ -169,7 +213,10 @@ class MetalspPriceClientTest extends TestCase
         Http::fake(['https://site.test/api/prices' => Http::response([
             'gold' => ['geram' => 17_882_778],
         ])]);
-        Cache::shouldReceive('flexible')->once()->andThrow(new \RuntimeException('Cache is unavailable.'));
+        Cache::partialMock()
+            ->shouldReceive('many')
+            ->once()
+            ->andThrow(new \RuntimeException('Cache is unavailable.'));
 
         $prices = app(TalaboardClient::class)->prices();
 

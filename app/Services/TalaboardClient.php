@@ -10,6 +10,10 @@ use Illuminate\Support\Facades\Log;
 
 class TalaboardClient
 {
+    private const PRICES_CACHE_KEY = 'talaboard:prices:v1';
+
+    private const PRICES_CACHE_CREATED_KEY = 'illuminate:cache:flexible:created:'.self::PRICES_CACHE_KEY;
+
     private ?Collection $resolvedPrices = null;
 
     private function logger(): mixed
@@ -57,22 +61,77 @@ class TalaboardClient
         $staleTtl = max($ttl, (int) config('services.talaboard.prices_stale_ttl', 60));
 
         try {
+            $cached = Cache::many([
+                self::PRICES_CACHE_KEY,
+                self::PRICES_CACHE_CREATED_KEY,
+            ]);
+
+            if (in_array(null, $cached, true)) {
+                $snapshots = $this->safeLatestSnapshots();
+
+                if ($snapshots->isNotEmpty()) {
+                    // Seed the flexible cache as stale. Laravel will return
+                    // this durable value immediately and defer the live HTTP
+                    // refresh until after the Telegram response is sent.
+                    Cache::putMany([
+                        self::PRICES_CACHE_KEY => $snapshots,
+                        self::PRICES_CACHE_CREATED_KEY => now()->subSeconds($ttl + 1)->getTimestamp(),
+                    ], $staleTtl);
+                }
+            }
+
             return $this->resolvedPrices = Cache::flexible(
-                'talaboard:prices:v1',
+                self::PRICES_CACHE_KEY,
                 [$ttl, $staleTtl],
                 fn () => $this->fetchAndStorePrices(),
             );
         } catch (\Throwable $exception) {
-            $this->logger()->warning('Live price cache is unavailable; fetching prices directly.', [
+            $this->logger()->warning('Live price cache is unavailable; using durable snapshots.', [
                 'exception' => $exception::class,
                 'message' => $exception->getMessage(),
             ]);
+
+            $snapshots = $this->safeLatestSnapshots();
+            if ($snapshots->isNotEmpty()) {
+                defer(fn () => $this->refresh(), 'talaboard:prices:cold-refresh');
+
+                return $this->resolvedPrices = $snapshots;
+            }
 
             return $this->resolvedPrices = $this->fetchAndStorePrices();
         }
     }
 
-    private function fetchAndStorePrices(): Collection
+    /**
+     * Refresh the shared price cache without making a Telegram request wait.
+     */
+    public function refresh(bool $storeSnapshots = true): Collection
+    {
+        $prices = $this->fetchAndStorePrices($storeSnapshots);
+        $this->resolvedPrices = $prices;
+
+        $staleTtl = max(
+            1,
+            (int) config('services.talaboard.prices_cache_ttl', 5),
+            (int) config('services.talaboard.prices_stale_ttl', 60),
+        );
+
+        try {
+            Cache::putMany([
+                self::PRICES_CACHE_KEY => $prices,
+                self::PRICES_CACHE_CREATED_KEY => now()->getTimestamp(),
+            ], $staleTtl);
+        } catch (\Throwable $exception) {
+            $this->logger()->warning('Unable to update the shared live price cache.', [
+                'exception' => $exception::class,
+                'message' => $exception->getMessage(),
+            ]);
+        }
+
+        return $prices;
+    }
+
+    private function fetchAndStorePrices(bool $storeSnapshots = true): Collection
     {
         $url = config('services.talaboard.url');
         $token = config('services.talaboard.token');
@@ -133,18 +192,20 @@ class TalaboardClient
         }
 
         $savedSymbols = [];
-        try {
-            foreach ($liveSnapshots as $symbol => $snapshot) {
-                $snapshot->save();
-                $savedSymbols[] = $symbol;
+        if ($storeSnapshots) {
+            try {
+                foreach ($liveSnapshots as $symbol => $snapshot) {
+                    $snapshot->save();
+                    $savedSymbols[] = $symbol;
+                }
+            } catch (\Throwable $exception) {
+                // Persistence is a fallback for outages and must never prevent a
+                // valid upstream response from being shown to the user.
+                $log->warning('Unable to store live price snapshots; using in-memory prices.', [
+                    'exception' => $exception::class,
+                    'message' => $exception->getMessage(),
+                ]);
             }
-        } catch (\Throwable $exception) {
-            // Persistence is a fallback for outages and must never prevent a
-            // valid upstream response from being shown to the user.
-            $log->warning('Unable to store live price snapshots; using in-memory prices.', [
-                'exception' => $exception::class,
-                'message' => $exception->getMessage(),
-            ]);
         }
 
         // Fill products omitted by the current response from stored snapshots,
