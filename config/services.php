@@ -14,6 +14,8 @@ return [
     ],
     'telegram' => [
         'token' => env('TELEGRAM_BOT_TOKEN'),
+        'api_url' => env('TELEGRAM_API_URL'),
+        'relay_secret' => env('TELEGRAM_RELAY_SECRET'),
         'connect_secret' => env('TELEGRAM_CONNECT_SECRET'),
         'defer_sends' => env('TELEGRAM_DEFER_SENDS', env('APP_ENV') !== 'testing'),
         'async_webhook' => env('TELEGRAM_ASYNC_WEBHOOK', env('APP_ENV') !== 'testing'),
