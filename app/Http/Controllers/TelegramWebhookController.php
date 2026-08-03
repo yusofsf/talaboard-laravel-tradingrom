@@ -185,8 +185,6 @@ class TelegramWebhookController extends Controller
         }
 
         $token = config('services.telegram.token');
-        $relayUrl = trim((string) config('services.telegram.api_url'));
-        $relaySecret = (string) (config('services.telegram.relay_secret') ?: $token);
 
         if (! $token) {
             Log::channel(config('trading.log_channel', 'trading'))->warning('Telegram API token is not configured.', ['method' => $method]);
@@ -209,17 +207,11 @@ class TelegramWebhookController extends Controller
                 ->connectTimeout((int) config('services.telegram.connect_timeout', 5))
                 ->timeout((int) config('services.telegram.timeout', 10))
                 ->withOptions($options);
-            if ($relayUrl !== '') {
-                $request = $request->withHeaders(['X-Telegram-Relay-Secret' => $relaySecret]);
-            }
             $attempts = max(1, (int) config('services.telegram.retry_attempts', 1));
             if ($attempts > 1) {
                 $request = $request->retry($attempts, (int) config('services.telegram.retry_delay', 100));
             }
-            $endpoint = $relayUrl !== ''
-                ? rtrim($relayUrl, '/').'/'.$method
-                : "https://api.telegram.org/bot{$token}/{$method}";
-            $response = $request->post($endpoint, $data);
+            $response = $request->post("https://api.telegram.org/bot{$token}/{$method}", $data);
             $result = $response->json() ?? [];
             Log::channel(config('trading.log_channel', 'trading'))->log(
                 $response->successful() && ($result['ok'] ?? true) ? 'debug' : 'warning',
@@ -230,11 +222,7 @@ class TelegramWebhookController extends Controller
 
             return $result;
         } catch (\Throwable $exception) {
-            $safeMessage = str_replace(
-                array_filter([(string) $token, $relaySecret]),
-                '[REDACTED]',
-                $exception->getMessage(),
-            );
+            $safeMessage = str_replace((string) $token, '[REDACTED]', $exception->getMessage());
             Log::channel(config('trading.log_channel', 'trading'))->error('Telegram API request failed.', [
                 'method' => $method,
                 'exception' => $exception::class,

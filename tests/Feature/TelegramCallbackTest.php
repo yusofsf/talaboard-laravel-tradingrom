@@ -239,31 +239,6 @@ class TelegramCallbackTest extends TestCase
             && $request['chat_id'] === 12345);
     }
 
-    public function test_telegram_requests_can_use_a_private_relay_without_exposing_the_bot_token(): void
-    {
-        config([
-            'services.telegram.token' => 'private-bot-token',
-            'services.telegram.api_url' => 'https://telegram-relay.example/telegram',
-            'services.telegram.relay_secret' => 'private-relay-secret',
-            'services.telegram.async_webhook' => false,
-            'services.telegram.defer_sends' => false,
-        ]);
-        Http::fake(['https://telegram-relay.example/*' => Http::response(['ok' => true])]);
-
-        $this->postJson('/api/telegram/webhook', [
-            'message' => [
-                'chat' => ['id' => 12345],
-                'from' => ['id' => 67890],
-                'text' => '/connect',
-            ],
-        ])->assertNoContent();
-
-        Http::assertSent(fn ($request) => $request->url() === 'https://telegram-relay.example/telegram/sendMessage'
-            && $request->hasHeader('X-Telegram-Relay-Secret', 'private-relay-secret')
-            && ! str_contains($request->url(), 'private-bot-token')
-            && $request['chat_id'] === 12345);
-    }
-
     public function test_missing_trading_log_channel_does_not_block_a_bot_reply(): void
     {
         config([
