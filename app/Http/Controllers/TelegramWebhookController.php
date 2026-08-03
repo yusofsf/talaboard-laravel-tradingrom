@@ -76,6 +76,33 @@ class TelegramWebhookController extends Controller
         ];
     }
 
+    private function fastLivePriceWebhookReply(Request $request, TalaboardClient $prices): ?array
+    {
+        if (! config('services.telegram.async_webhook', true)
+            || ! config('services.telegram.fast_webhook_reply', true)
+            || trim((string) $request->input('message.text', '')) !== 'قیمت لحظه‌ای') {
+            return null;
+        }
+
+        $chatId = $request->input('message.chat.id');
+        if (blank($chatId)) {
+            return null;
+        }
+
+        // The public price feed does not need a user or membership lookup.
+        // Keeping this path ahead of database-backed ingress bookkeeping also
+        // prevents an expired membership cache from delaying the reply.
+        return [
+            'method' => 'sendMessage',
+            'chat_id' => $chatId,
+            'text' => $this->livePricesText($prices),
+            'reply_markup' => [
+                'keyboard' => self::MAIN_MENU,
+                'resize_keyboard' => true,
+            ],
+        ];
+    }
+
     private function captureSendMessage(array $data): bool
     {
         if (! $this->captureWebhookReply || $this->webhookReply !== null) {
@@ -1840,6 +1867,15 @@ class TelegramWebhookController extends Controller
 
         if ($reply = $this->fastStartWebhookReply($request)) {
             defer(fn () => $this->audit('webhook.fast_start', [
+                'update_id' => $request->input('update_id'),
+                'chat_id' => $request->input('message.chat.id'),
+            ]));
+
+            return response()->json($reply);
+        }
+
+        if ($reply = $this->fastLivePriceWebhookReply($request, $prices)) {
+            defer(fn () => $this->audit('webhook.fast_live_prices', [
                 'update_id' => $request->input('update_id'),
                 'chat_id' => $request->input('message.chat.id'),
             ]));

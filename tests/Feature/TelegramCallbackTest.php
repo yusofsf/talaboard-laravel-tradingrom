@@ -4,6 +4,8 @@ namespace Tests\Feature;
 
 use App\Jobs\ProcessTelegramCallback;
 use App\Jobs\ProcessTelegramUpdate;
+use App\Models\PriceSnapshot;
+use App\Services\TalaboardClient;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -114,6 +116,37 @@ class TelegramCallbackTest extends TestCase
             ->assertJsonPath('chat_id', 24680)
             ->assertJsonPath('reply_markup.resize_keyboard', true)
             ->assertJsonCount(6, 'reply_markup.keyboard');
+    }
+
+    public function test_live_prices_skip_membership_and_user_lookups_on_the_fast_path(): void
+    {
+        config([
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_webhook_reply' => true,
+            'services.membership.url' => 'https://slow-membership.test/api/telegram',
+            'services.membership.token' => 'membership-token',
+        ]);
+        $client = $this->mock(TalaboardClient::class);
+        $client->shouldReceive('prices')->once()->andReturn(collect([
+            'gold_gram' => new PriceSnapshot(['price' => 87_980_000]),
+        ]));
+        Http::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'update_id' => 987655,
+            'message' => [
+                'chat' => ['id' => 24680],
+                'from' => ['id' => 24680],
+                'text' => 'قیمت لحظه‌ای',
+            ],
+        ]);
+
+        $response->assertOk()
+            ->assertJsonPath('method', 'sendMessage')
+            ->assertJsonPath('chat_id', 24680)
+            ->assertJsonPath('reply_markup.resize_keyboard', true);
+        $this->assertStringContainsString('گرم طلا: 8,798,000 تومان', $response->json('text'));
+        Http::assertNothingSent();
     }
 
     public function test_connect_command_is_acknowledged_before_membership_validation(): void
