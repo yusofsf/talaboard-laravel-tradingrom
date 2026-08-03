@@ -17,9 +17,7 @@ class MetalspPriceClientTest extends TestCase
     {
         parent::setUp();
 
-        config(['services.talaboard.prices_hot_cache_store' => 'array']);
         Cache::clear();
-        Cache::store('array')->clear();
     }
 
     public function test_it_fetches_prices_with_the_single_site_token(): void
@@ -184,28 +182,6 @@ class MetalspPriceClientTest extends TestCase
         $this->assertSame('800000000', $cached->get('gold_gram')->price);
         $this->assertNotNull(Cache::get('illuminate:cache:flexible:created:talaboard:prices:v1'));
         Http::assertSentCount(1);
-    }
-
-    public function test_local_hot_cache_avoids_a_cold_database_and_upstream_request(): void
-    {
-        config([
-            'cache.stores.hot_prices_test' => ['driver' => 'array', 'serialize' => false],
-            'services.talaboard.url' => 'https://site.test',
-            'services.talaboard.token' => null,
-            'services.talaboard.prices_cache_ttl' => 15,
-            'services.talaboard.prices_hot_cache_store' => 'hot_prices_test',
-        ]);
-        Http::fake(['https://site.test/api/prices' => Http::response([
-            'gold' => ['geram' => 80_000_000],
-        ])]);
-
-        app(TalaboardClient::class)->refresh();
-        Cache::clear();
-        Http::fake(fn () => throw new \RuntimeException('Upstream must not be called.'));
-
-        $prices = (new TalaboardClient)->prices();
-
-        $this->assertSame('800000000', $prices->get('gold_gram')->price);
     }
 
     public function test_price_cache_can_be_disabled(): void

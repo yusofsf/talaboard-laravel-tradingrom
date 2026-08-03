@@ -1897,21 +1897,22 @@ class TelegramWebhookController extends Controller
         if ($asyncWebhook && $callbackId) {
             $update['_callback_pre_answered'] = true;
 
-            // The database queue itself may need a cold connection. Delay
-            // that insert until the callback acknowledgement has already
-            // been flushed to Telegram. dispatchAfterResponse() is not used
-            // here because Laravel runs queueable jobs synchronously with it.
-            defer(function () use ($update) {
-                try {
-                    ProcessTelegramCallback::dispatch($update);
-                } catch (\Throwable $exception) {
-                    $this->audit('callback.dispatch.failed', [
-                        'queue_connection' => config('services.telegram.callback_queue_connection'),
-                        'queue' => config('services.telegram.callback_queue'),
-                        'exception' => $exception::class,
-                    ], 'error');
-                }
-            }, 'telegram:callback:enqueue', always: true);
+            try {
+                ProcessTelegramCallback::dispatch($update);
+            } catch (\Throwable $exception) {
+                $this->audit('callback.dispatch.failed', [
+                    'queue_connection' => config('services.telegram.callback_queue_connection'),
+                    'queue' => config('services.telegram.callback_queue'),
+                    'exception' => $exception::class,
+                ], 'error');
+
+                return response()->json([
+                    'method' => 'answerCallbackQuery',
+                    'callback_query_id' => $callbackId,
+                    'text' => 'ثبت درخواست ناموفق بود؛ دوباره تلاش کنید.',
+                    'show_alert' => true,
+                ]);
+            }
 
             return response()->json([
                 'method' => 'answerCallbackQuery',
