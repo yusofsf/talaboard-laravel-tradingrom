@@ -1854,6 +1854,22 @@ class TelegramWebhookController extends Controller
         return false;
     }
 
+    private function callbackQueueConnection(array $update): string
+    {
+        $data = (string) data_get($update, 'callback_query.data', '');
+
+        // These callbacks only advance the local trade wizard. Running them
+        // immediately after the webhook response avoids the database worker's
+        // polling delay between choosing an asset and choosing buy or sell.
+        if (preg_match('/^flow:trade:(?:asset|side):/', $data)) {
+            return (string) config('services.telegram.fast_callback_queue_connection', 'deferred');
+        }
+
+        // Transactional callbacks (creating, accepting or deleting an offer)
+        // continue to use the durable worker queue.
+        return (string) config('services.telegram.callback_queue_connection', 'database');
+    }
+
     public function __invoke(Request $request, TalaboardClient $prices, TelegramConnectionService $connections)
     {
         $this->traceId = (string) str()->uuid();
@@ -1896,12 +1912,13 @@ class TelegramWebhookController extends Controller
 
         if ($asyncWebhook && $callbackId) {
             $update['_callback_pre_answered'] = true;
+            $callbackQueueConnection = $this->callbackQueueConnection($update);
 
             try {
-                ProcessTelegramCallback::dispatch($update);
+                ProcessTelegramCallback::dispatch($update)->onConnection($callbackQueueConnection);
             } catch (\Throwable $exception) {
                 $this->audit('callback.dispatch.failed', [
-                    'queue_connection' => config('services.telegram.callback_queue_connection'),
+                    'queue_connection' => $callbackQueueConnection,
                     'queue' => config('services.telegram.callback_queue'),
                     'exception' => $exception::class,
                 ], 'error');

@@ -45,6 +45,65 @@ class TelegramCallbackTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_trade_wizard_navigation_does_not_wait_for_the_database_worker(): void
+    {
+        config([
+            'services.telegram.async_webhook' => true,
+            'services.telegram.callback_queue_connection' => 'database',
+            'services.telegram.fast_callback_queue_connection' => 'deferred',
+            'services.telegram.callback_queue' => 'telegram',
+        ]);
+        Queue::fake();
+
+        $response = $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'trade-side-callback-id',
+                'data' => 'flow:trade:side:buy',
+                'from' => ['id' => 12345],
+                'message' => ['chat' => ['id' => 12345]],
+            ],
+        ]);
+
+        $response->assertOk()->assertJsonPath('callback_query_id', 'trade-side-callback-id');
+        Queue::assertPushed(ProcessTelegramCallback::class, fn (ProcessTelegramCallback $job) => data_get($job->update, 'callback_query.data') === 'flow:trade:side:buy'
+            && $job->connection === 'deferred'
+            && $job->queue === 'telegram'
+        );
+        Http::assertNothingSent();
+    }
+
+    public function test_deferred_trade_side_callback_advances_the_flow_without_a_worker(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.telegram.async_webhook' => true,
+            'services.telegram.fast_callback_queue_connection' => 'deferred',
+        ]);
+        Cache::put('telegram-flow:54321', [
+            'type' => 'trade',
+            'stage' => 'side',
+            'asset' => 'gold',
+        ]);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'deferred-trade-side-callback',
+                'data' => 'flow:trade:side:sell',
+                'from' => ['id' => 54321],
+                'message' => ['chat' => ['id' => 54321]],
+            ],
+        ])->assertOk();
+
+        $flow = Cache::get('telegram-flow:54321');
+        $this->assertSame('sell', $flow['side']);
+        $this->assertSame('quantity', $flow['stage']);
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && (string) $request['chat_id'] === '54321'
+            && str_contains((string) $request['text'], 'نوع معامله')
+        );
+    }
+
     public function test_message_uses_direct_webhook_reply_without_outbound_telegram_request(): void
     {
         config([
