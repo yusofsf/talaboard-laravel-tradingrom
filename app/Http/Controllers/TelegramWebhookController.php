@@ -1146,36 +1146,25 @@ class TelegramWebhookController extends Controller
             return false;
         }
 
-        if (! empty($message['channel_id']) && ! empty($message['message_id'])) {
-            $deletedMessage = $this->api('deleteMessage', ['chat_id' => $message['channel_id'], 'message_id' => $message['message_id']]);
-            $this->audit('offer.channel_deleted', [
-                'offer_id' => $offerId,
-                'channel_id' => $message['channel_id'],
-                'message_id' => $message['message_id'],
-                'telegram_ok' => $deletedMessage['ok'] ?? null,
-            ]);
-        }
-        Cache::forget('telegram-offer-message:'.$offerId);
-
         $resultMessage = 'کل معامله با موفقیت انجام شد.';
+        $remainingOffer = null;
         if ($quantity !== null) {
-            $remainingOffer = (array) ($accepted['remaining_offer'] ?? $accepted['offer'] ?? $original);
-            $remaining = (float) ($accepted['remaining_quantity'] ?? $remainingOffer['remaining_quantity'] ?? max(0, (float) ($original['quantity'] ?? 0) - $quantity));
-            $remainingUnit = (string) ($remainingOffer['unit'] ?? $original['unit'] ?? 'gram');
-            $remainingAsset = (string) ($remainingOffer['asset'] ?? $original['asset'] ?? '');
+            $responseOffer = (array) ($accepted['remaining_offer'] ?? $accepted['offer'] ?? $original);
+            $remaining = (float) ($accepted['remaining_quantity'] ?? $responseOffer['remaining_quantity'] ?? max(0, (float) ($original['quantity'] ?? 0) - $quantity));
+            $remainingUnit = (string) ($responseOffer['unit'] ?? $original['unit'] ?? 'gram');
+            $remainingAsset = (string) ($responseOffer['asset'] ?? $original['asset'] ?? '');
             $unitLabel = ['gram' => 'گرم', 'mesghal' => 'مثقال', 'piece' => 'عدد', 'count' => 'عدد'];
             $acceptedUnit = $unitLabel[$original['unit'] ?? ''] ?? ($original['unit'] ?? '');
-            $remainingUnitLabel = $unitLabel[$remainingOffer['unit'] ?? $original['unit'] ?? ''] ?? ($remainingOffer['unit'] ?? $original['unit'] ?? '');
+            $remainingUnitLabel = $unitLabel[$responseOffer['unit'] ?? $original['unit'] ?? ''] ?? ($responseOffer['unit'] ?? $original['unit'] ?? '');
             if ($remaining > 0 && Trade::meetsMinimumQuantity($remainingUnit === 'piece' ? 'count' : $remainingUnit, $remaining, $remainingAsset)) {
                 $remainingOffer = [
                     ...$original,
-                    ...$remainingOffer,
-                    'id' => $remainingOffer['id'] ?? $remainingOffer['offer_id'] ?? $offerId,
+                    ...$responseOffer,
+                    'id' => $responseOffer['id'] ?? $responseOffer['offer_id'] ?? $offerId,
                     'quantity' => $remaining,
-                    'total_price' => (int) round($remaining * (float) ($remainingOffer['unit_price'] ?? $original['unit_price'] ?? 0)),
+                    'total_price' => (int) round($remaining * (float) ($responseOffer['unit_price'] ?? $original['unit_price'] ?? 0)),
                     'status' => 'active',
                 ];
-                $this->publishOfferToChannel($remainingOffer);
                 $resultMessage = 'بخشی از معامله با موفقیت انجام شد.'
                     ."\nمقدار انجام‌شده: {$this->formatQuantity($quantity)} {$acceptedUnit}"
                     ."\nمانده معامله: {$this->formatQuantity($remaining)} {$remainingUnitLabel}";
@@ -1183,6 +1172,40 @@ class TelegramWebhookController extends Controller
                 $resultMessage = 'بخشی از معامله با موفقیت انجام شد و معامله به‌طور کامل به پایان رسید.'
                     ."\nمقدار انجام‌شده: {$this->formatQuantity($quantity)} {$acceptedUnit}";
             }
+        }
+
+        Cache::forget('telegram-offer-message:'.$offerId);
+        if (! empty($message['channel_id']) && ! empty($message['message_id'])) {
+            if ($remainingOffer !== null) {
+                $deletedMessage = $this->api('deleteMessage', ['chat_id' => $message['channel_id'], 'message_id' => $message['message_id']]);
+                $this->audit('offer.channel_deleted', [
+                    'offer_id' => $offerId,
+                    'channel_id' => $message['channel_id'],
+                    'message_id' => $message['message_id'],
+                    'telegram_ok' => $deletedMessage['ok'] ?? null,
+                ]);
+                $this->publishOfferToChannel($remainingOffer);
+            } else {
+                $channelText = trim((string) ($message['text'] ?? ''));
+                if ($channelText === '' && $original !== []) {
+                    $channelText = $this->channelOfferText($original);
+                }
+                $completedText = ($channelText === '' ? '' : $channelText."\n\n").'✅ معامله کامل شد';
+                $editedMessage = $this->api('editMessageText', [
+                    'chat_id' => $message['channel_id'],
+                    'message_id' => $message['message_id'],
+                    'text' => $completedText,
+                    'reply_markup' => ['inline_keyboard' => []],
+                ]);
+                $this->audit('offer.channel_completed', [
+                    'offer_id' => $offerId,
+                    'channel_id' => $message['channel_id'],
+                    'message_id' => $message['message_id'],
+                    'telegram_ok' => $editedMessage['ok'] ?? null,
+                ]);
+            }
+        } elseif ($remainingOffer !== null) {
+            $this->publishOfferToChannel($remainingOffer);
         }
 
         Cache::forget($processingKey);
@@ -1238,6 +1261,7 @@ class TelegramWebhookController extends Controller
             ...((array) $offerMessage),
             'channel_id' => $chat['id'] ?? data_get($offerMessage, 'channel_id'),
             'message_id' => data_get($callback, 'message.message_id', data_get($offerMessage, 'message_id')),
+            'text' => data_get($callback, 'message.text', data_get($offerMessage, 'text')),
         ];
         Cache::put('telegram-offer-message:'.$offerId, $offerMessage, now()->addMinutes(10));
         if ($this->offerIsExpired((array) ($offerMessage['offer'] ?? []))) {

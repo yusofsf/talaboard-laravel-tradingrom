@@ -725,9 +725,12 @@ class TelegramCallbackTest extends TestCase
         Http::assertSent(fn ($request) => str_contains($request->url(), '/answerCallbackQuery')
             && $request['text'] === 'پیامی از طرف ربات برای انجام معامله به خصوصی شما ارسال شد.'
             && $request['show_alert'] === true);
-        Http::assertSent(fn ($request) => str_contains($request->url(), '/deleteMessage')
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/deleteMessage'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/editMessageText')
             && $request['chat_id'] === '@gold_room'
-            && $request['message_id'] === 77);
+            && $request['message_id'] === 77
+            && str_contains((string) $request['text'], '✅ معامله کامل شد')
+            && ($request['reply_markup']['inline_keyboard'] ?? null) === []);
     }
 
     public function test_accept_partial_offer_uses_the_entered_quantity(): void
@@ -784,6 +787,53 @@ class TelegramCallbackTest extends TestCase
             && (string) $request['chat_id'] === '12345'
             && str_contains((string) $request['text'], 'بخشی از معامله با موفقیت انجام شد')
             && str_contains((string) $request['text'], 'مانده معامله: 150 گرم'));
+    }
+
+    public function test_partial_acceptance_that_finishes_the_offer_keeps_and_marks_the_channel_message(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Cache::put('telegram-offer-message:23', [
+            'channel_id' => '@gold_room', 'message_id' => 77,
+            'offer' => ['id' => 23, 'side' => 'sell', 'asset' => 'gold', 'unit' => 'gram', 'quantity' => 100, 'unit_price' => 18_000_000, 'alias' => 'بازرگان'],
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => true]),
+            'https://talaboard.test/api/telegram/trade-room/offers/23/accept' => Http::response(['accepted' => true, 'remaining_quantity' => 0]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'callback-id',
+                'data' => 'trade_accept:partial:23',
+                'from' => ['id' => 12345],
+                'message' => [
+                    'message_id' => 77,
+                    'chat' => ['id' => '@gold_room'],
+                    'text' => "📣 فروش طلا\n\nمقدار: 100 گرم\nوضعیت: فعال",
+                ],
+            ],
+        ])->assertNoContent();
+
+        $this->postJson('/api/telegram/webhook', [
+            'message' => [
+                'chat' => ['id' => 12345],
+                'from' => ['id' => 67890],
+                'text' => '100',
+            ],
+        ])->assertNoContent();
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/deleteMessage'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/editMessageText')
+            && $request['chat_id'] === '@gold_room'
+            && $request['message_id'] === 77
+            && str_contains((string) $request['text'], 'مقدار: 100 گرم')
+            && str_ends_with((string) $request['text'], '✅ معامله کامل شد')
+            && ($request['reply_markup']['inline_keyboard'] ?? null) === []);
     }
 
     public function test_second_acceptor_is_told_the_offer_is_in_progress(): void
