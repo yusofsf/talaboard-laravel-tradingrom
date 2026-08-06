@@ -2,9 +2,12 @@
 
 namespace Tests\Feature;
 
+use App\Http\Controllers\TelegramWebhookController;
 use App\Jobs\ProcessTelegramCallback;
 use App\Jobs\ProcessTelegramUpdate;
 use App\Models\PriceSnapshot;
+use App\Models\TelegramConnection;
+use App\Models\User;
 use App\Services\TalaboardClient;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -988,6 +991,21 @@ class TelegramCallbackTest extends TestCase
         ])->assertNoContent();
 
         $this->assertSame('بازرگان طلا', Cache::get('telegram-trade-alias:44444'));
+    }
+
+    public function test_connected_user_trade_alias_is_read_from_the_connection_chat_id(): void
+    {
+        $user = new User(['telegram_chat_id' => null]);
+        $user->setRelation('telegramConnection', new TelegramConnection([
+            'telegram_user_id' => '55555',
+            'telegram_chat_id' => '44444',
+        ]));
+        Cache::forever('telegram-trade-alias:44444', 'بازرگان طلا');
+
+        $method = new \ReflectionMethod(TelegramWebhookController::class, 'tradeAlias');
+        $alias = $method->invoke(app(TelegramWebhookController::class), $user);
+
+        $this->assertSame('بازرگان طلا', $alias);
     }
 
     public function test_custom_toman_price_is_sent_to_the_site_as_rial(): void

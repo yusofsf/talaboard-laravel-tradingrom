@@ -784,12 +784,18 @@ class TelegramWebhookController extends Controller
 
     private function aliasKey(User $user): string
     {
-        return 'telegram-trade-alias:'.$user->telegram_chat_id;
+        return 'telegram-trade-alias:'.$this->telegramChatId($user);
     }
 
     private function tradeAlias(User $user): string
     {
         return (string) Cache::get($this->aliasKey($user), 'کاربر');
+    }
+
+    private function telegramChatId(User $user): string
+    {
+        return (string) ($user->telegram_chat_id
+            ?: optional($user->telegramConnection)->telegram_chat_id);
     }
 
     private function formatQuantity(float $quantity): string
