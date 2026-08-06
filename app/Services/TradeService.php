@@ -22,7 +22,7 @@ class TradeService
         if (! $isCoin && $data['unit'] !== 'gram') throw ValidationException::withMessages(['unit' => 'معامله طلا و نقره فقط بر حسب گرم قابل ثبت است.']);
 
         if (! Trade::meetsMinimumQuantity($data['unit'], (float) $data['quantity'], $data['asset'])) {
-            throw ValidationException::withMessages(['quantity' => 'حداقل مقدار معامله نقره ۱۰۰ گرم است.']);
+            throw ValidationException::withMessages(['quantity' => Trade::minimumQuantityMessage($data['asset'])]);
         }
 
         $symbol = $isCoin ? $data['asset'] : ($data['asset'] === 'gold' ? 'gold_'.$data['unit'] : $data['asset'].'_'.$data['unit']);

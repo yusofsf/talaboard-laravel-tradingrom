@@ -692,6 +692,67 @@ class TelegramCallbackTest extends TestCase
             && ($request['reply_markup']['inline_keyboard'][0][1]['callback_data'] ?? null) === 'trade_accept:partial:23');
     }
 
+    public function test_partial_gold_offer_below_one_gram_is_rejected_before_calling_the_site(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Cache::put('telegram-flow:12345', [
+            'type' => 'trade', 'stage' => 'partial_mode', 'side' => 'sell', 'asset' => 'gold',
+            'unit' => 'gram', 'quantity' => 0.5, 'unit_price' => 18_167_293,
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => true]),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'partial-mode-callback',
+                'data' => 'flow:trade:partial:yes',
+                'from' => ['id' => 12345],
+                'message' => ['message_id' => 56, 'chat' => ['id' => 12345]],
+            ],
+        ])->assertNoContent();
+
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/trade-room/offers/create'));
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'حداقل مقدار فروش یا پذیرش جزئی طلا ۱ گرم است'));
+    }
+
+    public function test_site_server_error_is_not_exposed_to_the_telegram_user(): void
+    {
+        config([
+            'services.telegram.token' => 'test-token',
+            'services.membership.url' => 'https://talaboard.test/api/telegram',
+            'services.membership.token' => 'shared-secret',
+        ]);
+        Cache::put('telegram-flow:12345', [
+            'type' => 'trade', 'stage' => 'partial_mode', 'side' => 'sell', 'asset' => 'gold',
+            'unit' => 'gram', 'quantity' => 1, 'unit_price' => 18_167_293,
+        ]);
+        Http::fake([
+            'https://talaboard.test/api/telegram/member' => Http::response(['linked' => true, 'vip' => true]),
+            'https://talaboard.test/api/telegram/trade-room/offers/create' => Http::response(['message' => 'Server Error'], 500),
+            'https://api.telegram.org/*' => Http::response(['ok' => true]),
+        ]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'partial-mode-callback',
+                'data' => 'flow:trade:partial:yes',
+                'from' => ['id' => 12345],
+                'message' => ['message_id' => 56, 'chat' => ['id' => 12345]],
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/sendMessage')
+            && str_contains((string) $request['text'], 'خطای موقت سایت رخ داد')
+            && ! str_contains((string) $request['text'], 'Server Error'));
+    }
+
     public function test_accept_full_offer_posts_the_acceptance_to_the_site(): void
     {
         config([

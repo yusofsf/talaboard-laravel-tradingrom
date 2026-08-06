@@ -348,9 +348,12 @@ class TelegramWebhookController extends Controller
             $this->audit('site.response', ['endpoint' => $endpoint, 'status' => $response->status(), 'duration_ms' => (int) round((microtime(true) - $startedAt) * 1000), 'response_keys' => is_array($responsePayload) ? array_keys($responsePayload) : []], $response->successful() ? 'debug' : 'warning');
 
             if (! $response->successful()) {
-                $this->lastSiteError = is_array($responsePayload)
-                    ? (string) ($responsePayload['message'] ?? data_get($responsePayload, 'errors.0.0', 'سایت درخواست را نپذیرفت.'))
-                    : 'سایت درخواست را نپذیرفت.';
+                $siteMessage = is_array($responsePayload)
+                    ? (string) ($responsePayload['message'] ?? data_get($responsePayload, 'errors.0.0', ''))
+                    : '';
+                $this->lastSiteError = ($response->serverError() && $siteMessage === '') || in_array(mb_strtolower(trim($siteMessage)), ['server error', 'internal server error'], true)
+                    ? 'خطای موقت سایت رخ داد؛ لطفاً چند لحظه دیگر دوباره تلاش کنید.'
+                    : ($siteMessage !== '' ? $siteMessage : 'سایت درخواست را نپذیرفت.');
 
                 return null;
             }
@@ -1084,7 +1087,7 @@ class TelegramWebhookController extends Controller
             $asset = (string) ($original['asset'] ?? $original['item'] ?? '');
             if ($quantity > $available || ! Trade::meetsMinimumQuantity($unit, $quantity, $asset) || ($remaining > 0 && ! Trade::meetsMinimumQuantity($unit, $remaining, $asset))) {
                 Cache::forget($processingKey);
-                $this->send($chatId, 'مقدار واردشده معتبر نیست؛ مقدار پذیرش و ماندهٔ معامله باید حداقل مجاز را داشته باشند.', $menu);
+                $this->send($chatId, 'مقدار واردشده معتبر نیست؛ '.Trade::minimumQuantityMessage($asset).' مقدار پذیرش و ماندهٔ معامله باید این حداقل را داشته باشند.', $menu);
 
                 return false;
             }
@@ -1320,7 +1323,8 @@ class TelegramWebhookController extends Controller
             'channel_id' => $chat['id'] ?? null,
             'message_id' => data_get($callback, 'message.message_id'),
         ]);
-        $this->send($privateChatId, 'مقدار موردنظر برای پذیرش جزئی را وارد کنید. حداقل مقدار مجاز و حداکثر مقدار همین معامله قابل قبول است.', $menu);
+        $asset = (string) data_get($offerMessage, 'offer.asset', '');
+        $this->send($privateChatId, 'مقدار موردنظر برای پذیرش جزئی را وارد کنید. '.Trade::minimumQuantityMessage($asset).' ماندهٔ معامله نیز باید این حداقل را داشته باشد.', $menu);
 
         return true;
     }
@@ -1610,7 +1614,7 @@ class TelegramWebhookController extends Controller
         }
 
         if (! $this->meetsMinimumTradeQuantity($flow['unit'], (float) $flow['quantity'], $flow['asset'])) {
-            $this->send($chat['id'], $selection.'حداقل مقدار معامله نقره ۱۰۰ گرم است.', $menu);
+            $this->send($chat['id'], $selection.Trade::minimumQuantityMessage($flow['asset']), $menu);
 
             return;
         }
@@ -2328,7 +2332,7 @@ class TelegramWebhookController extends Controller
             $quantity = is_numeric($text) ? (float) $text : 0;
             $unit = (string) ($flow['unit'] ?? 'gram');
             if (! Trade::meetsMinimumQuantity($unit === 'piece' ? 'count' : $unit, $quantity, (string) ($flow['asset'] ?? ''))) {
-                $this->send($chat['id'], 'برای پذیرش جزئی، مقدار معتبر و حداقل مجاز معامله را وارد کنید.', $menu);
+                $this->send($chat['id'], Trade::minimumQuantityMessage((string) ($flow['asset'] ?? '')).' مقدار معتبر دیگری وارد کنید.', $menu);
             } else {
                 $this->clearFlow($user);
                 $this->acceptOffer($user, $chat['id'], (int) ($flow['offer_id'] ?? 0), $quantity, $menu, (string) ($flow['acceptance_token'] ?? ''));
