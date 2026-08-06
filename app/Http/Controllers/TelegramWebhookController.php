@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ExpireTelegramOffer;
 use App\Jobs\ProcessTelegramCallback;
 use App\Jobs\ProcessTelegramUpdate;
 use App\Models\DepositRequest;
@@ -778,8 +779,52 @@ class TelegramWebhookController extends Controller
             'message_id' => $messageId,
             'offer' => $trade,
         ], now()->addDays(30));
+        $expiresAt = Carbon::parse($trade['expires_at'] ?? now()->addMinutes(2));
+        ExpireTelegramOffer::dispatch($trade['id'], $channel, $messageId, $expiresAt->toIso8601String())
+            ->delay($expiresAt);
 
         return true;
+    }
+
+    public function expirePublishedOffer(
+        int|string $offerId,
+        int|string $channelId,
+        int|string $messageId,
+        string $expiresAt,
+    ): bool {
+        if (Carbon::parse($expiresAt)->isFuture()) {
+            return false;
+        }
+
+        $cacheKey = 'telegram-offer-message:'.$offerId;
+        $message = (array) Cache::get($cacheKey, []);
+        if ((string) ($message['channel_id'] ?? '') !== (string) $channelId
+            || (string) ($message['message_id'] ?? '') !== (string) $messageId) {
+            return false;
+        }
+
+        $offer = (array) ($message['offer'] ?? []);
+        $text = trim((string) ($message['text'] ?? ''));
+        if ($text === '' && $offer !== []) {
+            $text = $this->channelOfferText($offer);
+        }
+        if (! str_contains($text, 'معامله منقضی شد')) {
+            $text = ($text === '' ? '' : $text."\n\n").'⏱ معامله منقضی شد';
+        }
+
+        $result = $this->api('editMessageText', [
+            'chat_id' => $channelId,
+            'message_id' => $messageId,
+            'text' => $text,
+            'reply_markup' => ['inline_keyboard' => []],
+        ]);
+        if (($result['ok'] ?? false) === true) {
+            Cache::forget($cacheKey);
+
+            return true;
+        }
+
+        return false;
     }
 
     private function aliasKey(User $user): string
@@ -1281,9 +1326,14 @@ class TelegramWebhookController extends Controller
                 'show_alert' => true,
             ]);
             if ($messageId = data_get($callback, 'message.message_id')) {
-                $this->api('deleteMessage', ['chat_id' => $chat['id'] ?? null, 'message_id' => $messageId]);
+                $this->expirePublishedOffer(
+                    $offerId,
+                    $chat['id'] ?? '',
+                    $messageId,
+                    (string) data_get($offerMessage, 'offer.expires_at', now()->subSecond()->toIso8601String()),
+                );
             }
-            $this->send($user->telegram_chat_id ?: data_get($callback, 'from.id'), 'زمان این معامله منقضی شده است؛ پذیرش جزئی یا کامل دیگر امکان‌پذیر نیست.', $menu);
+            $this->send($this->telegramChatId($user) ?: data_get($callback, 'from.id'), 'زمان این معامله منقضی شده است؛ پذیرش جزئی یا کامل دیگر امکان‌پذیر نیست.', $menu);
 
             return true;
         }

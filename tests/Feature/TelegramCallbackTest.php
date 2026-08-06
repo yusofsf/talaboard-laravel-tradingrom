@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Http\Controllers\TelegramWebhookController;
+use App\Jobs\ExpireTelegramOffer;
 use App\Jobs\ProcessTelegramCallback;
 use App\Jobs\ProcessTelegramUpdate;
 use App\Models\PriceSnapshot;
@@ -17,6 +18,13 @@ use Tests\TestCase;
 
 class TelegramCallbackTest extends TestCase
 {
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        Queue::fake([ExpireTelegramOffer::class]);
+    }
+
     public function test_webhook_dispatches_processing_and_acknowledges_callback_immediately(): void
     {
         config([
@@ -693,6 +701,82 @@ class TelegramCallbackTest extends TestCase
             && str_contains((string) $request['text'], 'قیمت واحد: 1,816,729 تومان')
             && ($request['reply_markup']['inline_keyboard'][0][0]['callback_data'] ?? null) === 'trade_accept:full:23'
             && ($request['reply_markup']['inline_keyboard'][0][1]['callback_data'] ?? null) === 'trade_accept:partial:23');
+        Queue::assertPushed(ExpireTelegramOffer::class, fn (ExpireTelegramOffer $job) => $job->offerId === 23
+            && $job->channelId === '@gold_room'
+            && $job->messageId === 77);
+    }
+
+    public function test_expired_channel_offer_loses_its_buttons_and_is_marked_expired(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        $expiresAt = now()->subSecond()->toIso8601String();
+        Cache::put('telegram-offer-message:23', [
+            'channel_id' => '@gold_room',
+            'message_id' => 77,
+            'offer' => [
+                'id' => 23,
+                'side' => 'sell',
+                'asset' => 'gold',
+                'unit' => 'gram',
+                'quantity' => 100,
+                'unit_price' => 18_000_000,
+                'alias' => 'بازرگان',
+                'expires_at' => $expiresAt,
+            ],
+        ]);
+        Http::fake([
+            'https://api.telegram.org/*' => Http::response(['ok' => true, 'result' => ['message_id' => 77]]),
+        ]);
+
+        (new ExpireTelegramOffer(23, '@gold_room', 77, $expiresAt))
+            ->handle(app(TelegramWebhookController::class));
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/editMessageText')
+            && $request['chat_id'] === '@gold_room'
+            && $request['message_id'] === 77
+            && str_contains((string) $request['text'], 'نام مستعار: بازرگان')
+            && str_ends_with((string) $request['text'], 'معامله منقضی شد')
+            && ($request['reply_markup']['inline_keyboard'] ?? null) === []);
+        $this->assertNull(Cache::get('telegram-offer-message:23'));
+    }
+
+    public function test_clicking_an_expired_offer_edits_the_channel_message_instead_of_deleting_it(): void
+    {
+        config(['services.telegram.token' => 'test-token']);
+        Cache::put('telegram-linked:12345', true, now()->addMinute());
+        Cache::put('telegram-membership:12345', ['linked' => true, 'vip' => true], now()->addMinute());
+        Cache::put('telegram-offer-message:23', [
+            'channel_id' => '@gold_room',
+            'message_id' => 77,
+            'offer' => [
+                'id' => 23,
+                'side' => 'sell',
+                'asset' => 'gold',
+                'unit' => 'gram',
+                'quantity' => 100,
+                'unit_price' => 18_000_000,
+                'expires_at' => now()->subSecond()->toIso8601String(),
+            ],
+        ]);
+        Http::fake(['https://api.telegram.org/*' => Http::response(['ok' => true])]);
+
+        $this->postJson('/api/telegram/webhook', [
+            'callback_query' => [
+                'id' => 'expired-offer-callback',
+                'data' => 'trade_accept:full:23',
+                'from' => ['id' => 12345],
+                'message' => [
+                    'message_id' => 77,
+                    'chat' => ['id' => '@gold_room'],
+                    'text' => "📣 فروش طلا\n\nوضعیت: فعال",
+                ],
+            ],
+        ])->assertNoContent();
+
+        Http::assertSent(fn ($request) => str_contains($request->url(), '/editMessageText')
+            && str_ends_with((string) $request['text'], 'معامله منقضی شد')
+            && ($request['reply_markup']['inline_keyboard'] ?? null) === []);
+        Http::assertNotSent(fn ($request) => str_contains($request->url(), '/deleteMessage'));
     }
 
     public function test_partial_gold_offer_below_one_gram_is_rejected_before_calling_the_site(): void
